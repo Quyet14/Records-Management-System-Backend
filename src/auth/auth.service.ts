@@ -6,7 +6,7 @@ import { ConfigService } from '@nestjs/config';
 import { createTransport, Transporter } from 'nodemailer';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
-import { User } from '../entities/user.entity';
+import { DEFAULT_USER_PERMISSIONS, User, UserRole } from '../entities/user.entity';
 import { RefreshToken } from '../entities/refresh-token.entity';
 import { OtpCode } from '../entities/otp-code.entity';
 import { LoginConfirmation } from '../entities/login-confirmation.entity';
@@ -403,6 +403,9 @@ export class AuthService {
       email: user.email,
       role: user.role,
       departmentId: user.department?.id ?? null,
+      permissions:
+        user.permissions ??
+        (user.role === UserRole.USER ? DEFAULT_USER_PERMISSIONS : []),
     };
 
     const accessToken = this.jwtService.sign(payload, {
@@ -434,6 +437,9 @@ export class AuthService {
         fullName: user.fullName,
         email: user.email,
         role: user.role,
+        permissions:
+          user.permissions ??
+          (user.role === UserRole.USER ? DEFAULT_USER_PERMISSIONS : []),
         department: user.department
           ? { id: user.department.id, name: user.department.name }
           : null,

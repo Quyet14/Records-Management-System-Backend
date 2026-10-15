@@ -9,7 +9,12 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import * as bcrypt from 'bcrypt';
-import { User, UserRole } from '../entities/user.entity';
+import {
+  DEFAULT_USER_PERMISSIONS,
+  User,
+  UserPermission,
+  UserRole,
+} from '../entities/user.entity';
 import { AuditLog } from '../entities/audit-log.entity';
 import { RefreshToken } from '../entities/refresh-token.entity';
 import { CreateUserDto } from './dto/create-user.dto';
@@ -20,6 +25,12 @@ export interface AuthUser {
   role: UserRole;
   departmentId?: string;
 }
+
+export const ASSIGNABLE_USER_PERMISSIONS = [
+  UserPermission.APPROVE_DOCUMENTS,
+  UserPermission.VIEW_DEPARTMENT_DOCUMENTS,
+  UserPermission.ADD_DOCUMENT_COMMENTS,
+] as const;
 
 @Injectable()
 export class UsersService {
@@ -51,22 +62,36 @@ export class UsersService {
       passwordHash,
       mustChangePassword: true,
       role: dto.role || UserRole.USER,
+      permissions:
+        (dto.role || UserRole.USER) === UserRole.USER
+          ? [...DEFAULT_USER_PERMISSIONS]
+          : [],
       department: dto.departmentId ? ({ id: dto.departmentId } as any) : null,
     });
     return this.repo.save(user);
   }
 
-  findAll() {
-    return this.repo.find({ relations: ['department'] });
+  async findAll() {
+    const users = await this.repo.find({ relations: ['department'] });
+    return users.map((user) => this.withEffectivePermissions(user));
   }
 
-  findByDepartment(departmentId: string): Promise<User[]> {
-    return this.repo
+  async findByDepartment(departmentId: string): Promise<User[]> {
+    const users = await this.repo
       .createQueryBuilder('user')
       .leftJoinAndSelect('user.department', 'department')
       .where('department.id = :departmentId', { departmentId })
       .andWhere('user.role != :adminRole', { adminRole: UserRole.ADMIN })
       .getMany();
+    return users.map((user) => this.withEffectivePermissions(user));
+  }
+
+  getAssignablePermissions() {
+    return [
+      { key: UserPermission.VIEW_DEPARTMENT_DOCUMENTS, label: 'Xem tài liệu nội bộ khoa', description: 'Xem trực tiếp tài liệu nội bộ cùng khoa đã duyệt, không cần gửi yêu cầu.' },
+      { key: UserPermission.ADD_DOCUMENT_COMMENTS, label: 'Thêm ghi chú tài liệu', description: 'Thêm ghi chú vào tài liệu được phép tra cứu.' },
+      { key: UserPermission.APPROVE_DOCUMENTS, label: 'Phê duyệt tài liệu tải lên', description: 'Xem hàng chờ, phê duyệt hoặc từ chối tài liệu trong cùng khoa.' },
+    ];
   }
 
   async update(
@@ -119,7 +144,7 @@ export class UsersService {
       relations: ['department'],
     });
     if (!user) throw new NotFoundException('Không tìm thấy người dùng');
-    return user;
+    return this.withEffectivePermissions(user);
   }
 
   async updateRole(
@@ -129,15 +154,50 @@ export class UsersService {
   ): Promise<User> {
     const target = await this.findById(targetId);
 
+    if (actor.role === UserRole.DEPARTMENT_HEAD) {
+      if (target.role === UserRole.DEPARTMENT_HEAD) {
+        throw new ForbiddenException(
+          'Truong khoa khong duoc phan quyen cho tai khoan Truong khoa khac',
+        );
+      }
+      if (!actor.departmentId) {
+        throw new ForbiddenException('Tai khoan Truong khoa chua duoc gan khoa');
+      }
+      if (target.role !== UserRole.USER) {
+        throw new ForbiddenException(
+          'Truong khoa chi duoc phan quyen cho nhan vien thuong',
+        );
+      }
+      if (!target.department || target.department.id !== actor.departmentId) {
+        throw new ForbiddenException(
+          'Ban chi co the phan quyen cho nhan vien trong khoa minh',
+        );
+      }
+      if (dto.role !== UserRole.USER) {
+        throw new ForbiddenException(
+          'Truong khoa khong duoc cap quyen Truong khoa hoac Admin',
+        );
+      }
+      if (dto.departmentId && dto.departmentId !== actor.departmentId) {
+        throw new ForbiddenException(
+          'Truong khoa khong duoc chuyen nhan vien sang khoa khac',
+        );
+      }
+    }
+
     if (dto.role === UserRole.DEPARTMENT_HEAD && !dto.departmentId) {
       throw new BadRequestException('Trưởng khoa phải thuộc một khoa');
     }
 
     const oldRole = target.role;
     target.role = dto.role;
-    target.department = dto.departmentId
-      ? ({ id: dto.departmentId } as any)
-      : target.department;
+    target.permissions =
+      dto.role === UserRole.USER
+        ? target.permissions ?? [...DEFAULT_USER_PERMISSIONS]
+        : [];
+    if (actor.role === UserRole.ADMIN && dto.departmentId) {
+      target.department = { id: dto.departmentId } as any;
+    }
 
     const saved = await this.repo.save(target);
 
@@ -172,6 +232,55 @@ export class UsersService {
     return this.findById(saved.id);
   }
 
+  async updatePermissions(
+    targetId: string,
+    permissions: UserPermission[],
+    actor: AuthUser,
+  ): Promise<User> {
+    if (actor.role !== UserRole.ADMIN && actor.role !== UserRole.DEPARTMENT_HEAD) {
+      throw new ForbiddenException('Bạn không có quyền phân quyền nhân viên');
+    }
+    const target = await this.findById(targetId);
+    const nextPermissions = this.normalizeAssignablePermissions(permissions);
+
+    if (target.role !== UserRole.USER) {
+      throw new ForbiddenException(
+        'Chi co the phan quyen chi tiet cho tai khoan nhan vien thuong',
+      );
+    }
+
+    if (actor.role === UserRole.DEPARTMENT_HEAD) {
+      if (!actor.departmentId) {
+        throw new ForbiddenException('Tai khoan Truong khoa chua duoc gan khoa');
+      }
+      if (!target.department || target.department.id !== actor.departmentId) {
+        throw new ForbiddenException(
+          'Ban chi co the phan quyen cho nhan vien trong khoa minh',
+        );
+      }
+    }
+
+    target.permissions = nextPermissions;
+    const saved = await this.repo.save(target);
+    await this.revokeAllTokens(targetId);
+
+    try {
+      const entry = this.auditRepo.create({
+        actor: { id: actor.id } as any,
+        action: 'permission_change',
+        metadata: {
+          targetUserId: targetId,
+          permissions: nextPermissions,
+        },
+      });
+      await this.auditRepo.save(entry);
+    } catch (_) {
+      // Audit failures must not block the main operation
+    }
+
+    return this.findById(saved.id);
+  }
+
   async setActive(
     id: string,
     isActive: boolean,
@@ -180,9 +289,9 @@ export class UsersService {
     const target = await this.findById(id);
 
     if (actor.role === UserRole.DEPARTMENT_HEAD) {
-      if (target.role === UserRole.ADMIN) {
+      if (target.role !== UserRole.USER) {
         throw new ForbiddenException(
-          'Không thể thay đổi trạng thái tài khoản Admin',
+          'Truong khoa chi duoc thay doi trang thai tai khoan nhan vien thuong',
         );
       }
       if (!target.department || target.department.id !== actor.departmentId) {
@@ -211,5 +320,29 @@ export class UsersService {
     }
 
     return this.findById(id);
+  }
+
+  private normalizeAssignablePermissions(
+    permissions: UserPermission[] | undefined,
+  ): UserPermission[] {
+    const allowed = new Set<UserPermission>(ASSIGNABLE_USER_PERMISSIONS);
+    return Array.from(new Set((permissions ?? []).map(permission =>
+      permission === UserPermission.REQUEST_DOCUMENT_VIEW ? UserPermission.VIEW_DEPARTMENT_DOCUMENTS : permission,
+    ))).filter((permission) =>
+      allowed.has(permission),
+    );
+  }
+
+  private withEffectivePermissions(user: User): User {
+    if (user.permissions != null) {
+      user.permissions = this.normalizeAssignablePermissions(user.permissions);
+    }
+    if (user.role === UserRole.USER && user.permissions == null) {
+      user.permissions = [...DEFAULT_USER_PERMISSIONS];
+    }
+    if (user.role !== UserRole.USER && user.permissions == null) {
+      user.permissions = [];
+    }
+    return user;
   }
 }

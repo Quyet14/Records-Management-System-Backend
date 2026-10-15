@@ -11,6 +11,7 @@ import {
 import { UsersService } from './users.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserRoleDto } from './dto/update-user-role.dto';
+import { UpdateUserPermissionsDto } from './dto/update-user-permissions.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
@@ -38,14 +39,35 @@ export class UsersController {
     return this.service.findByDepartment(user.departmentId);
   }
 
+  @Get('me')
+  getCurrentUser(@CurrentUser() user) {
+    return this.service.findById(user.id);
+  }
+
+  @Get('assignable-permissions')
+  @Roles(UserRole.ADMIN, UserRole.DEPARTMENT_HEAD)
+  getAssignablePermissions() {
+    return this.service.getAssignablePermissions();
+  }
+
   @Patch(':id/role')
-  @Roles(UserRole.ADMIN)
+  @Roles(UserRole.ADMIN, UserRole.DEPARTMENT_HEAD)
   updateRole(
     @Param('id') id: string,
     @Body() dto: UpdateUserRoleDto,
     @CurrentUser() admin,
   ) {
     return this.service.updateRole(id, dto, admin);
+  }
+
+  @Patch(':id/permissions')
+  @Roles(UserRole.ADMIN, UserRole.DEPARTMENT_HEAD)
+  updatePermissions(
+    @Param('id') id: string,
+    @Body() dto: UpdateUserPermissionsDto,
+    @CurrentUser() actor,
+  ) {
+    return this.service.updatePermissions(id, dto.permissions, actor);
   }
 
   /** PATCH /users/:id — Admin sửa thông tin đầy đủ, user thường sửa profile của mình */

@@ -6,6 +6,8 @@ import { createTransport, Transporter } from 'nodemailer';
 import { Subject } from 'rxjs';
 import { Notification, NotificationType } from '../entities/notification.entity';
 import { User, UserRole } from '../entities/user.entity';
+import { Document } from '../entities/document.entity';
+import { applyDocumentSecurityScope, canAccessDocumentSecurity, DocumentSecurityUser } from '../common/document-security';
 
 // ─── Event payload types ──────────────────────────────────────
 export interface DocumentStatusEvent {
@@ -65,6 +67,7 @@ export class NotificationsService {
   constructor(
     @InjectRepository(Notification) private notiRepo: Repository<Notification>,
     @InjectRepository(User) private userRepo: Repository<User>,
+    @InjectRepository(Document) private docRepo: Repository<Document>,
   ) {
     this.initMailer();
   }
@@ -114,6 +117,15 @@ export class NotificationsService {
     message: string,
     documentId?: string,
   ) {
+    if (documentId) {
+      const [doc, recipient] = await Promise.all([
+        this.docRepo.findOne({ where: { id: documentId }, relations: ['uploader', 'department'] }),
+        this.userRepo.findOne({ where: { id: recipientId }, relations: ['department'] }),
+      ]);
+      if (!doc || !recipient || !canAccessDocumentSecurity(doc, {
+        id: recipient.id, role: recipient.role, departmentId: recipient.department?.id,
+      })) return;
+    }
     const noti = this.notiRepo.create({
       recipient: { id: recipientId } as any,
       type,
@@ -302,15 +314,16 @@ export class NotificationsService {
     }
   }
 
-  getMyNotifications(userId: string, unreadOnly = false) {
+  getMyNotifications(user: DocumentSecurityUser, unreadOnly = false) {
     const qb = this.notiRepo
       .createQueryBuilder('noti')
       .leftJoinAndSelect('noti.document', 'doc')
-      .where('noti.recipient_id = :userId', { userId })
+      .where('noti.recipient_id = :userId', { userId: user.id })
       .orderBy('noti.createdAt', 'DESC')
       .limit(50);
 
     if (unreadOnly) qb.andWhere('noti.is_read = false');
+    applyDocumentSecurityScope(qb, user, 'doc', true);
     return qb.getMany();
   }
 
@@ -328,9 +341,11 @@ export class NotificationsService {
     );
   }
 
-  countUnread(userId: string): Promise<number> {
-    return this.notiRepo.count({
-      where: { recipient: { id: userId }, isRead: false },
-    });
+  countUnread(user: DocumentSecurityUser): Promise<number> {
+    const qb = this.notiRepo.createQueryBuilder('noti')
+      .leftJoin('noti.document', 'doc')
+      .where('noti.recipient_id = :userId', { userId: user.id })
+      .andWhere('noti.is_read = false');
+    return applyDocumentSecurityScope(qb, user, 'doc', true).getCount();
   }
 }

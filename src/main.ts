@@ -28,6 +28,7 @@ setInterval(() => {
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module';
+import { Server } from 'http';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -41,6 +42,10 @@ async function bootstrap() {
   );
 
   app.enableCors(); // siết lại origin cụ thể khi lên production
+
+  // Large multipart uploads can exceed Node's default request deadline.
+  // Keep header/idle protections; allow the upload body to finish streaming.
+  (app.getHttpServer() as Server).requestTimeout = 0;
 
   const port = process.env.PORT || 3002;
   await app.listen(port, '0.0.0.0');

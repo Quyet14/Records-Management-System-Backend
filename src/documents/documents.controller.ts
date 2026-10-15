@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Query,
@@ -23,6 +24,7 @@ import { ExportService } from '../export/export.service';
 import { WatermarkService } from '../common/watermark/watermark.service';
 import { IpWhitelistGuard } from '../common/guards/ip-whitelist.guard';
 import { multerOptions } from './multer.config';
+import { inferMimeType, isPdfFile } from './allowed-file-types';
 import { UploadDocumentDto } from './dto/upload-document.dto';
 import {
   RejectDocumentDto,
@@ -34,13 +36,15 @@ import { UpdateMetadataDto } from './dto/update-metadata.dto';
 import { UpdateDocumentDto } from './dto/update-document.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
+import { PermissionsGuard } from '../common/guards/permissions.guard';
 import { Roles } from '../common/decorators/roles.decorator';
+import { Permissions } from '../common/decorators/permissions.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { DocumentAccessGuard } from '../common/guards/document-access.guard';
-import { UserRole } from '../entities/user.entity';
+import { UserPermission, UserRole } from '../entities/user.entity';
 import { ReviewStatus } from '../entities/document.entity';
 
-@UseGuards(JwtAuthGuard, RolesGuard, IpWhitelistGuard)
+@UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard, IpWhitelistGuard)
 @Controller('documents')
 export class DocumentsController {
   constructor(
@@ -69,18 +73,19 @@ export class DocumentsController {
     @UploadedFiles() files: Express.Multer.File[],
     @Body('departmentId') departmentId: string,
     @CurrentUser() user,
+    @Body('securityLevel') securityLevel?: string,
   ) {
-    return this.service.uploadMultiple(files, departmentId, user);
+    return this.service.uploadMultiple(files, departmentId, user, securityLevel);
   }
 
   @Get('pending')
-  @Roles(UserRole.ADMIN, UserRole.DEPARTMENT_HEAD)
+  @Permissions(UserPermission.APPROVE_DOCUMENTS)
   pendingQueue(@Query() query: PendingQueueDto, @CurrentUser() user) {
     return this.service.findPendingQueue(user, query);
   }
 
   @Patch(':id/approve')
-  @Roles(UserRole.ADMIN, UserRole.DEPARTMENT_HEAD)
+  @Permissions(UserPermission.APPROVE_DOCUMENTS)
   approve(@Param('id') id: string, @CurrentUser() user) {
     return this.service.approve(id, user);
   }
@@ -99,7 +104,7 @@ export class DocumentsController {
     return this.service.updateDocument(id, dto, user);
   }
   @Patch(':id/reject')
-  @Roles(UserRole.ADMIN, UserRole.DEPARTMENT_HEAD)
+  @Permissions(UserPermission.APPROVE_DOCUMENTS)
   reject(
     @Param('id') id: string,
     @Body() dto: RejectDocumentDto,
@@ -225,19 +230,19 @@ export class DocumentsController {
     @Res() res: Response,
   ) {
     const doc = await this.service.getFileForDownload(id, user);
-    const pdfBuffer = watermark === 'true'
+    const mimeType = doc.file?.mimeType ?? inferMimeType(doc.originalFilename);
+    const canWatermark = watermark === 'true' && isPdfFile(doc.originalFilename, mimeType);
+    const fileBuffer = canWatermark
       ? await this.watermarkService.applyWatermark(doc.storagePath, {
           userName: user.fullName ?? user.email ?? user.id,
           userEmail: user.email ?? '',
         })
       : this.watermarkService.readOriginal(doc.storagePath);
-    const filename = doc.originalFilename.endsWith('.pdf')
-      ? doc.originalFilename
-      : `${doc.originalFilename}.pdf`;
-    res.setHeader('Content-Type', 'application/pdf');
+    const filename = doc.originalFilename;
+    res.setHeader('Content-Type', mimeType);
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
-    res.setHeader('Content-Length', pdfBuffer.length);
-    res.send(pdfBuffer);
+    res.setHeader('Content-Length', fileBuffer.length);
+    res.send(fileBuffer);
   }
 
   /** GET /documents/:id/view — xem file gốc; thêm watermark=true nếu cần */
@@ -253,7 +258,7 @@ export class DocumentsController {
     res.setHeader('Content-Type', file.mimeType);
     res.setHeader(
       'Content-Disposition',
-      `inline; filename="${encodeURIComponent(file.filename)}"`,
+      `${isPdfFile(file.filename, file.mimeType) ? 'inline' : 'attachment'}; filename="${encodeURIComponent(file.filename)}"`,
     );
     return new StreamableFile(createReadStream(file.path));
   }
@@ -274,6 +279,12 @@ export class DocumentsController {
   @Get(':id/comments')
   getComments(@Param('id') id: string, @CurrentUser() user) {
     return this.service.getComments(id, user);
+  }
+
+  /** Full metadata; file viewing/downloading retains its separate access checks. */
+  @Get(':id')
+  getDetail(@Param('id', new ParseUUIDPipe()) id: string, @CurrentUser() user) {
+    return this.service.getDetail(id, user);
   }
 
   /** Xóa ghi chú (chỉ tác giả hoặc Admin) */

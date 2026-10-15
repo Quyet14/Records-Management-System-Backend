@@ -9,6 +9,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, Repository } from 'typeorm';
 import { Document, DocumentStatus } from '../../entities/document.entity';
 import { UserRole } from '../../entities/user.entity';
+import { canReviewDocument, canViewDepartmentDocument } from '../document-permissions';
+import { assertDocumentSecurityAccess } from '../document-security';
 import {
   ViewRequest,
   ViewRequestStatus,
@@ -36,6 +38,18 @@ export class DocumentAccessGuard implements CanActivate {
       relations: ['department', 'uploader', 'file'],
     });
     if (!doc) throw new NotFoundException('Khong tim thay tai lieu');
+    assertDocumentSecurityAccess(doc, user);
+
+    const isOwner = doc.uploader?.id === user.id;
+    if (isOwner) {
+      req.documentForView = doc;
+      return true;
+    }
+
+    if (doc.status === DocumentStatus.PENDING && canReviewDocument(doc, user)) {
+      req.documentForView = doc;
+      return true;
+    }
 
     const isPublished =
       doc.status === DocumentStatus.STORED ||
@@ -54,6 +68,11 @@ export class DocumentAccessGuard implements CanActivate {
       doc.department?.id &&
       doc.department.id === user.departmentId
     ) {
+      req.documentForView = doc;
+      return true;
+    }
+
+    if (canViewDepartmentDocument(doc, user)) {
       req.documentForView = doc;
       return true;
     }

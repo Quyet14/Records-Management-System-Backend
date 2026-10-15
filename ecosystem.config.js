@@ -14,6 +14,7 @@ module.exports = {
       env_production: {
         NODE_ENV: 'production',
         PORT: 3002,
+        MAX_FILE_SIZE_MB: 51200,
       },
       error_file: './logs/err.log',
       out_file: './logs/out.log',

@@ -9,7 +9,9 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Document, DocumentStatus } from '../entities/document.entity';
-import { User, UserRole } from '../entities/user.entity';
+import { canReviewDocument, canViewDepartmentDocument } from '../common/document-permissions';
+import { applyDocumentSecurityScope, assertDocumentSecurityAccess } from '../common/document-security';
+import { User, UserRole, UserPermission } from '../entities/user.entity';
 import {
   ViewRequest,
   ViewRequestStatus,
@@ -24,6 +26,7 @@ interface AuthUser {
   email?: string;
   role: UserRole;
   departmentId?: string;
+  permissions?: UserPermission[];
 }
 
 const EXTEND_WINDOW_HOURS = 24;
@@ -41,11 +44,19 @@ export class ViewRequestsService {
   ) {}
 
   async create(documentId: string, dto: CreateViewRequestDto, user: AuthUser) {
+    if (user.role === UserRole.USER && !(user.permissions ?? []).includes(UserPermission.REQUEST_DOCUMENT_VIEW)) {
+      throw new ForbiddenException('Bạn chưa được cấp quyền gửi yêu cầu xem tài liệu');
+    }
     const doc = await this.docsRepo.findOne({
       where: { id: documentId },
-      relations: ['department'],
+      relations: ['department', 'uploader'],
     });
     if (!doc) throw new NotFoundException('Khong tim thay tai lieu');
+    assertDocumentSecurityAccess(doc, user);
+
+    if ((doc.uploader as any)?.id === user.id) {
+      throw new BadRequestException('Ban la nguoi tai len tai lieu nay nen co the xem truc tiep');
+    }
 
     const isPublished =
       doc.status === DocumentStatus.STORED ||
@@ -88,11 +99,15 @@ export class ViewRequestsService {
   }
 
   async extend(id: string, dto: CreateViewRequestDto, user: AuthUser) {
+    if (user.role === UserRole.USER && !(user.permissions ?? []).includes(UserPermission.REQUEST_DOCUMENT_VIEW)) {
+      throw new ForbiddenException('Bạn chưa được cấp quyền gửi yêu cầu xem tài liệu');
+    }
     const original = await this.viewRequestsRepo.findOne({
       where: { id },
-      relations: ['document', 'document.department', 'requester', 'extendedFromRequest'],
+      relations: ['document', 'document.department', 'document.uploader', 'requester', 'extendedFromRequest'],
     });
     if (!original) throw new NotFoundException('Khong tim thay yeu cau xem goc');
+    assertDocumentSecurityAccess(original.document, user);
 
     if (original.requester.id !== user.id) {
       throw new ForbiddenException('Ban chi co the gia han yeu cau xem cua chinh minh');
@@ -178,12 +193,37 @@ export class ViewRequestsService {
       });
     }
 
+    applyDocumentSecurityScope(qb, user, 'document');
     return qb.getMany();
   }
 
   async getViewStatus(documentId: string, user: AuthUser) {
-    const docExists = await this.docsRepo.exist({ where: { id: documentId } });
-    if (!docExists) throw new NotFoundException('Khong tim thay tai lieu');
+    const doc = await this.docsRepo.findOne({
+      where: { id: documentId },
+      relations: ['uploader', 'department'],
+    });
+    if (!doc) throw new NotFoundException('Khong tim thay tai lieu');
+    assertDocumentSecurityAccess(doc, user);
+
+    if ((doc.uploader as any)?.id === user.id) {
+      return {
+        status: 'owner',
+        canView: true,
+        expiresAt: null,
+        decisionNote: '',
+      };
+    }
+
+    if (
+      [DocumentStatus.PENDING, DocumentStatus.APPROVED, DocumentStatus.STORED].includes(doc.status)
+      && canReviewDocument(doc, user)
+    ) {
+      return { status: 'approved', canView: true, expiresAt: null, accessSource: 'document_review' };
+    }
+
+    if (canViewDepartmentDocument(doc, user)) {
+      return { status: 'approved', canView: true, expiresAt: null, accessSource: 'department_permission' };
+    }
 
     const requests = await this.viewRequestsRepo.find({
       where: {
@@ -240,6 +280,11 @@ export class ViewRequestsService {
 
   async approve(id: string, dto: ApproveViewRequestDto, user: AuthUser) {
     const request = await this.getForDecision(id, user);
+    assertDocumentSecurityAccess(request.document, {
+      id: request.requester.id,
+      role: request.requester.role,
+      departmentId: request.requester.department?.id,
+    });
     if (request.status !== ViewRequestStatus.PENDING) {
       throw new ForbiddenException('Yeu cau nay da duoc xu ly truoc do');
     }
@@ -331,9 +376,10 @@ export class ViewRequestsService {
 
     const request = await this.viewRequestsRepo.findOne({
       where: { id },
-      relations: ['document', 'document.department', 'document.documentType', 'requester'],
+      relations: ['document', 'document.department', 'document.uploader', 'document.documentType', 'requester', 'requester.department'],
     });
     if (!request) throw new NotFoundException('Khong tim thay yeu cau xem');
+    assertDocumentSecurityAccess(request.document, user);
 
     if (
       user.role === UserRole.DEPARTMENT_HEAD &&

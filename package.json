@@ -12,6 +12,8 @@
     "data:migrate-sqlserver": "node scripts/data-pipeline.js migrate-sqlserver",
     "data:backup-sync": "node scripts/data-pipeline.js backup-sync",
     "data:all": "node scripts/data-pipeline.js all",
+    "db:add-user-permissions": "node scripts/apply-user-permissions-migration.js",
+    "db:add-document-metadata": "node scripts/apply-document-metadata-migration.js",
     "user:reset-password": "node reset-password.js",
     "typeorm": "typeorm-ts-node-commonjs"
   },

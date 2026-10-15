@@ -32,9 +32,9 @@ export class DocumentTypesController {
     return this.service.findOne(id);
   }
 
-  /** Chỉ Admin được tạo / sửa / xóa loại hồ sơ */
+  /** Admin và Trưởng khoa được tạo; sửa/xóa loại hồ sơ chỉ dành cho Admin */
   @Post()
-  @Roles(UserRole.ADMIN)
+  @Roles(UserRole.ADMIN, UserRole.DEPARTMENT_HEAD)
   create(@Body() dto: CreateDocumentTypeDto) {
     return this.service.create(dto);
   }

@@ -1,0 +1,11 @@
+# Include this location inside the existing Nginx server block, if Nginx fronts the API.
+# Each frontend request sends one file. Allow multipart overhead above the 50 GiB file limit.
+location /documents/upload {
+    client_max_body_size 51g;
+    client_body_timeout 24h;
+    proxy_request_buffering off;
+    proxy_http_version 1.1;
+    proxy_send_timeout 24h;
+    proxy_read_timeout 24h;
+    proxy_pass http://127.0.0.1:3002;
+}

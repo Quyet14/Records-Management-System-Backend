@@ -13,6 +13,7 @@ import { CreateTagDto } from './dto/create-tag.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { UserRole } from '../entities/user.entity';
 
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -42,14 +43,14 @@ export class TagsController {
 
   /** Tìm tài liệu theo tag name (query: ?name=...) */
   @Get('search')
-  findDocsByTagName(@Query('name') name: string) {
-    return this.service.findDocumentsByTagName(name);
+  findDocsByTagName(@Query('name') name: string, @CurrentUser() user) {
+    return this.service.findDocumentsByTagName(name, user);
   }
 
   /** Tìm tài liệu theo tag ID */
   @Get(':id/documents')
-  findDocsByTag(@Param('id') id: string) {
-    return this.service.findDocumentsByTag(id);
+  findDocsByTag(@Param('id') id: string, @CurrentUser() user) {
+    return this.service.findDocumentsByTag(id, user);
   }
 
   /** Gắn tag vào tài liệu — Admin, DeptHead */
@@ -58,8 +59,9 @@ export class TagsController {
   addTag(
     @Param('docId') docId: string,
     @Param('tagId') tagId: string,
+    @CurrentUser() user,
   ) {
-    return this.service.addTagToDocument(docId, tagId);
+    return this.service.addTagToDocument(docId, tagId, user);
   }
 
   /** Gỡ tag khỏi tài liệu — Admin, DeptHead */
@@ -68,7 +70,8 @@ export class TagsController {
   removeTag(
     @Param('docId') docId: string,
     @Param('tagId') tagId: string,
+    @CurrentUser() user,
   ) {
-    return this.service.removeTagFromDocument(docId, tagId);
+    return this.service.removeTagFromDocument(docId, tagId, user);
   }
 }

@@ -26,13 +26,13 @@ export class NotificationsController {
     @CurrentUser() user,
     @Query('unread') unread?: string,
   ) {
-    return this.service.getMyNotifications(user.id, unread === 'true');
+    return this.service.getMyNotifications(user, unread === 'true');
   }
 
   /** Số thông báo chưa đọc */
   @Get('unread-count')
   async getUnreadCount(@CurrentUser() user) {
-    const count = await this.service.countUnread(user.id);
+    const count = await this.service.countUnread(user);
     return { count };
   }
 

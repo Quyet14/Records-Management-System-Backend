@@ -8,6 +8,7 @@ import { Repository } from 'typeorm';
 import { Tag } from '../entities/tag.entity';
 import { Document } from '../entities/document.entity';
 import { CreateTagDto } from './dto/create-tag.dto';
+import { applyDocumentSecurityScope, assertDocumentSecurityAccess, DocumentSecurityUser } from '../common/document-security';
 
 @Injectable()
 export class TagsService {
@@ -37,12 +38,13 @@ export class TagsService {
 
   // ─── Gắn / gỡ tag cho tài liệu ───────────────────────────────
 
-  async addTagToDocument(docId: string, tagId: string): Promise<Document> {
+  async addTagToDocument(docId: string, tagId: string, user: DocumentSecurityUser): Promise<Document> {
     const doc = await this.docRepo.findOne({
       where: { id: docId },
-      relations: ['tags'],
+      relations: ['tags', 'uploader', 'department'],
     });
     if (!doc) throw new NotFoundException('Không tìm thấy tài liệu');
+    assertDocumentSecurityAccess(doc, user);
 
     const tag = await this.tagRepo.findOne({ where: { id: tagId } });
     if (!tag) throw new NotFoundException('Không tìm thấy tag');
@@ -54,12 +56,13 @@ export class TagsService {
     return this.docRepo.save(doc);
   }
 
-  async removeTagFromDocument(docId: string, tagId: string): Promise<Document> {
+  async removeTagFromDocument(docId: string, tagId: string, user: DocumentSecurityUser): Promise<Document> {
     const doc = await this.docRepo.findOne({
       where: { id: docId },
-      relations: ['tags'],
+      relations: ['tags', 'uploader', 'department'],
     });
     if (!doc) throw new NotFoundException('Không tìm thấy tài liệu');
+    assertDocumentSecurityAccess(doc, user);
 
     doc.tags = (doc.tags || []).filter((t) => t.id !== tagId);
     return this.docRepo.save(doc);
@@ -67,29 +70,29 @@ export class TagsService {
 
   // ─── Tìm tài liệu theo tag ────────────────────────────────────
 
-  async findDocumentsByTag(tagId: string): Promise<Document[]> {
+  async findDocumentsByTag(tagId: string, user: DocumentSecurityUser): Promise<Document[]> {
     const tag = await this.tagRepo.findOne({ where: { id: tagId } });
     if (!tag) throw new NotFoundException('Không tìm thấy tag');
 
-    return this.docRepo
+    const qb = this.docRepo
       .createQueryBuilder('doc')
       .innerJoin('doc.tags', 'tag', 'tag.id = :tagId', { tagId })
       .leftJoinAndSelect('doc.uploader', 'uploader')
       .leftJoinAndSelect('doc.department', 'department')
       .leftJoinAndSelect('doc.tags', 'allTags')
-      .orderBy('doc.createdAt', 'DESC')
-      .getMany();
+      .orderBy('doc.createdAt', 'DESC');
+    return applyDocumentSecurityScope(qb, user).getMany();
   }
 
-  async findDocumentsByTagName(tagName: string): Promise<Document[]> {
+  async findDocumentsByTagName(tagName: string, user: DocumentSecurityUser): Promise<Document[]> {
     const normalized = tagName.toLowerCase().trim();
-    return this.docRepo
+    const qb = this.docRepo
       .createQueryBuilder('doc')
       .innerJoin('doc.tags', 'tag', 'tag.name = :name', { name: normalized })
       .leftJoinAndSelect('doc.uploader', 'uploader')
       .leftJoinAndSelect('doc.department', 'department')
       .leftJoinAndSelect('doc.tags', 'allTags')
-      .orderBy('doc.createdAt', 'DESC')
-      .getMany();
+      .orderBy('doc.createdAt', 'DESC');
+    return applyDocumentSecurityScope(qb, user).getMany();
   }
 }

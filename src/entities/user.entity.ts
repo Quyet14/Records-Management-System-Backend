@@ -14,6 +14,15 @@ export enum UserRole {
   ADMIN = 'admin',
 }
 
+export enum UserPermission {
+  APPROVE_DOCUMENTS = 'approve_documents',
+  REQUEST_DOCUMENT_VIEW = 'request_document_view',
+  VIEW_DEPARTMENT_DOCUMENTS = 'view_department_documents',
+  ADD_DOCUMENT_COMMENTS = 'add_document_comments',
+}
+
+export const DEFAULT_USER_PERMISSIONS: UserPermission[] = [];
+
 @Entity('users')
 export class User {
   @PrimaryGeneratedColumn('uuid')
@@ -30,6 +39,9 @@ export class User {
 
   @Column({ type: 'enum', enum: UserRole, default: UserRole.USER })
   role: UserRole;
+
+  @Column({ type: 'simple-json', nullable: true })
+  permissions: UserPermission[] | null;
 
   @ManyToOne(() => Department, { nullable: true })
   @JoinColumn({ name: 'department_id' })

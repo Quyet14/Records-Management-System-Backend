@@ -2,6 +2,8 @@ import { diskStorage } from 'multer';
 import { extname } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { BadRequestException } from '@nestjs/common';
+import { isAcceptedDocumentFile } from './allowed-file-types';
+import { MAX_UPLOAD_FILE_SIZE_BYTES } from '../common/upload-limits';
 
 export const multerOptions = {
   storage: diskStorage({
@@ -12,20 +14,16 @@ export const multerOptions = {
     },
   }),
   fileFilter: (req: any, file: Express.Multer.File, callback: any) => {
-    // Chỉ kiểm tra đuôi + mimetype ở tầng multer.
-    // Kiểm tra magic bytes thực sự nên bổ sung ở service (đọc vài byte đầu file) trước khi Approve.
-    const isPdf =
-      file.mimetype === 'application/pdf' &&
-      extname(file.originalname).toLowerCase() === '.pdf';
-    if (!isPdf) {
+    // Multer checks extension + mimetype early; service/download keeps the stored mimetype.
+    if (!isAcceptedDocumentFile(file)) {
       return callback(
-        new BadRequestException('Chỉ chấp nhận file định dạng PDF'),
+        new BadRequestException('Chi chap nhan file PDF hoac file nen: ZIP, RAR, 7Z, TAR, GZ, TGZ'),
         false,
       );
     }
     callback(null, true);
   },
   limits: {
-    fileSize: (parseInt(process.env.MAX_FILE_SIZE_MB || '50', 10)) * 1024 * 1024,
+    fileSize: MAX_UPLOAD_FILE_SIZE_BYTES,
   },
 };

@@ -18,7 +18,7 @@ import {
   DocumentVisibility,
 } from '../entities/document.entity';
 import { AuditLog } from '../entities/audit-log.entity';
-import { User, UserRole } from '../entities/user.entity';
+import { User, UserPermission, UserRole } from '../entities/user.entity';
 import { DocumentComment } from '../entities/document-comment.entity';
 import { StoredFile } from '../entities/stored-file.entity';
 import { AccessLog, AccessLogAction } from '../entities/access-log.entity';
@@ -26,11 +26,18 @@ import { UploadDocumentDto } from './dto/upload-document.dto';
 import { SearchDocumentDto } from './dto/review-document.dto';
 import { RetentionService } from '../retention/retention.service';
 import { JwtService } from '@nestjs/jwt';
+import { canReviewDepartmentDocuments, canReviewDocument } from '../common/document-permissions';
+import {
+  applyDocumentSecurityScope, assertDocumentSecurityAccess, assertSecurityLevelChange,
+  normalizeDocumentSecurityLevel,
+} from '../common/document-security';
+import { getNormalizedExt, inferMimeType } from './allowed-file-types';
 
 interface AuthUser {
   id: string;
   role: UserRole;
   departmentId?: string;
+  permissions?: UserPermission[];
   fileId?: string;
   tokenType?: string;
 }
@@ -84,10 +91,11 @@ export class DocumentsService {
   private buildContentAddressedLocation(
     departmentId: string | undefined,
     fileHash: string,
+    ext: string,
   ): string {
     const year = new Date().getFullYear().toString();
     const scope = departmentId || 'shared';
-    return path.join(this.archiveDir, scope, year, `${fileHash}.pdf`);
+    return path.join(this.archiveDir, scope, year, `${fileHash}${ext}`);
   }
 
   private async storePhysicalFile(
@@ -102,7 +110,11 @@ export class DocumentsService {
       return existing;
     }
 
-    const storageKey = this.buildContentAddressedLocation(departmentId, fileHash);
+    const storageKey = this.buildContentAddressedLocation(
+      departmentId,
+      fileHash,
+      getNormalizedExt(file.originalname),
+    );
     await this.withRetry(() => fs.mkdirSync(path.dirname(storageKey), { recursive: true }));
     await this.withRetry(() => fs.renameSync(file.path, storageKey));
 
@@ -110,7 +122,7 @@ export class DocumentsService {
       fileHash,
       storageKey,
       size: file.size,
-      mimeType: file.mimetype || 'application/pdf',
+      mimeType: inferMimeType(file.originalname, file.mimetype),
     }));
   }
 
@@ -172,7 +184,9 @@ export class DocumentsService {
     files: Express.Multer.File[],
     departmentId: string | undefined,
     user: AuthUser,
+    securityLevel?: string,
   ): Promise<{ success: Document[]; failed: { filename: string; error: string }[] }> {
+    const normalizedSecurityLevel = normalizeDocumentSecurityLevel(securityLevel);
     const success: Document[] = [];
     const failed: { filename: string; error: string }[] = [];
 
@@ -183,6 +197,7 @@ export class DocumentsService {
           originalFilename: file.originalname,
           // Dùng tên file (không có extension) làm title mặc định
           title: file.originalname.replace(/\.[^/.]+$/, ''),
+          securityLevel: normalizedSecurityLevel,
           department: departmentId ? ({ id: departmentId } as any) : null,
           uploader: { id: user.id } as any,
           status: DocumentStatus.PENDING,
@@ -218,6 +233,7 @@ export class DocumentsService {
     dto: UploadDocumentDto,
     user: AuthUser,
   ): Promise<Document> {
+    const securityLevel = normalizeDocumentSecurityLevel(dto.securityLevel);
     const visibility = dto.visibility ?? DocumentVisibility.DEPARTMENT;
     console.log(`[upload] visibility received: "${dto.visibility}" → using: "${visibility}"`);
 
@@ -247,7 +263,7 @@ export class DocumentsService {
         organizingBody:   dto.organizingBody,
         receivedDate:     dto.receivedDate ? new Date(dto.receivedDate) : undefined,
         documentNumber:   dto.documentNumber,
-        securityLevel:    dto.securityLevel,
+        securityLevel,
         authorName:       dto.authorName,
         description:      dto.description,
         department:       dto.departmentId ? ({ id: dto.departmentId } as any) : null,
@@ -291,7 +307,7 @@ export class DocumentsService {
       organizingBody:   dto.organizingBody,
       receivedDate:     dto.receivedDate ? new Date(dto.receivedDate) : undefined,
       documentNumber:   dto.documentNumber,
-      securityLevel:    dto.securityLevel,
+      securityLevel,
       authorName:       dto.authorName,
       description:      dto.description,
       department:       dto.departmentId ? ({ id: dto.departmentId } as any) : null,
@@ -324,6 +340,9 @@ export class DocumentsService {
   // ─── DUYỆT (Admin hoặc Trưởng Khoa trong khoa mình) ──────────
   async approve(id: string, actor: AuthUser): Promise<Document> {
     const doc = await this.getOrFail(id);
+    if (!canReviewDocument(doc, actor)) {
+      throw new ForbiddenException('Bạn không có quyền phê duyệt tài liệu này');
+    }
     if (doc.status !== DocumentStatus.PENDING) {
       throw new ForbiddenException('Tài liệu này đã được xử lý trước đó');
     }
@@ -349,7 +368,11 @@ export class DocumentsService {
 
     if (!doc.file) {
       checksum = checksum || await this.computeChecksum(doc.storagePath);
-      archivePath = this.buildContentAddressedLocation(doc.department?.id, checksum);
+      archivePath = this.buildContentAddressedLocation(
+        doc.department?.id,
+        checksum,
+        getNormalizedExt(doc.originalFilename),
+      );
       dirPath = path.dirname(archivePath);
       await this.withRetry(() => fs.mkdirSync(dirPath, { recursive: true }));
       await this.withRetry(() => fs.renameSync(doc.storagePath, archivePath));
@@ -357,7 +380,7 @@ export class DocumentsService {
         fileHash: checksum,
         storageKey: archivePath,
         size: doc.fileSizeBytes ?? 0,
-        mimeType: 'application/pdf',
+        mimeType: inferMimeType(doc.originalFilename),
       }));
     }
 
@@ -411,6 +434,9 @@ export class DocumentsService {
 
   async reject(id: string, actor: AuthUser, reason: string): Promise<Document> {
     const doc = await this.getOrFail(id);
+    if (!canReviewDocument(doc, actor)) {
+      throw new ForbiddenException('Bạn không có quyền từ chối tài liệu này');
+    }
     if (doc.status !== DocumentStatus.PENDING) {
       throw new ForbiddenException('Tài liệu này đã được xử lý trước đó');
     }
@@ -456,6 +482,9 @@ export class DocumentsService {
 
   // ─── HÀNG CHỜ DUYỆT (Admin: toàn hệ thống, Trưởng Khoa: khoa mình) ──────
   async findPendingQueue(user?: AuthUser, query?: { page?: number; limit?: number }) {
+    if (!user || (user.role !== UserRole.ADMIN && !canReviewDepartmentDocuments(user))) {
+      throw new ForbiddenException('Bạn không có quyền xem hàng chờ phê duyệt');
+    }
     const qb = this.docsRepo
       .createQueryBuilder('doc')
       .leftJoinAndSelect('doc.uploader', 'uploader')
@@ -465,10 +494,11 @@ export class DocumentsService {
       .where('doc.status = :status', { status: DocumentStatus.PENDING });
 
     // Trưởng khoa chỉ thấy tài liệu của khoa mình
-    if (user?.role === UserRole.DEPARTMENT_HEAD && user?.departmentId) {
+    if (user.role !== UserRole.ADMIN) {
       qb.andWhere('department.id = :deptId', { deptId: user.departmentId });
     }
 
+    applyDocumentSecurityScope(qb, user);
     qb.orderBy('doc.createdAt', 'ASC');
 
     const page = query?.page ?? 1;
@@ -519,14 +549,20 @@ export class DocumentsService {
       .leftJoinAndSelect('doc.approvedBy', 'approvedBy')
       .leftJoinAndSelect('doc.documentType', 'documentType')
       .leftJoinAndSelect('doc.file', 'file')
-      // ĐÃ SỬA: giới hạn field trả về cho danh sách, bỏ description (text OCR
-      // dài) khỏi response — giảm đáng kể kích thước payload phải serialize
-      // và truyền qua mạng khi có nhiều request đồng thời. Cần xem đầy đủ
-      // description thì gọi API chi tiết GET /documents/:id.
+      .leftJoinAndSelect('doc.tags', 'tags')
+      // Return metadata needed by every client-side document filter.
       .select([
         'doc.id',
         'doc.originalFilename',
         'doc.title',
+        'doc.summary',
+        'doc.referenceNo',
+        'doc.issuingUnit',
+        'doc.organizingBody',
+        'doc.receivedDate',
+        'doc.documentNumber',
+        'doc.securityLevel',
+        'doc.authorName',
         'doc.status',
         'doc.rejectReason',
         'doc.classificationValue',
@@ -552,11 +588,15 @@ export class DocumentsService {
         'documentType.code',
         'documentType.name',
         'documentType.isPermanent',
+        'tags.id',
+        'tags.name',
         'file.id',
         'file.storageKey',
         'file.mimeType',
         'file.size',
       ]);
+
+    if (query.includeContent === 'true') qb.addSelect('doc.description');
 
     if (user.role === UserRole.ADMIN) {
       if (query.departmentId) {
@@ -568,7 +608,6 @@ export class DocumentsService {
       // Public đã lưu trữ/duyệt được xem trên toàn hệ thống, không phụ thuộc khoa.
       const publicStoredOrApproved =
         '(doc.visibility = :public AND doc.status IN (:...publicStatuses))';
-
       if (user.departmentId) {
         qb.andWhere(
           `(
@@ -603,13 +642,24 @@ export class DocumentsService {
       qb.andWhere('doc.status = :status', { status: query.status });
     }
 
-    if (query.keyword) {
-      // Tạm thời tìm theo tên/tiêu đề trong MySQL.
-      // Giai đoạn 4 sẽ thay bằng gọi Meilisearch để tìm cả nội dung bên trong PDF.
-      qb.andWhere('(doc.title LIKE :kw OR doc.originalFilename LIKE :kw)', {
-        kw: `%${query.keyword}%`,
+    if (query.keyword?.trim()) {
+      query.keyword.trim().split(/\s+/).forEach((term, index) => {
+        const parameter = 'keyword' + index;
+        const keyword = '%' + term.replace(/[!%_]/g, '!$&') + '%';
+        qb.andWhere("(doc.title LIKE :keyword ESCAPE '!' OR doc.originalFilename LIKE :keyword ESCAPE '!' OR doc.description LIKE :keyword ESCAPE '!' OR doc.summary LIKE :keyword ESCAPE '!' OR doc.referenceNo LIKE :keyword ESCAPE '!' OR doc.issuingUnit LIKE :keyword ESCAPE '!' OR doc.organizingBody LIKE :keyword ESCAPE '!' OR doc.receivedDate LIKE :keyword ESCAPE '!' OR doc.documentNumber LIKE :keyword ESCAPE '!' OR doc.securityLevel LIKE :keyword ESCAPE '!' OR doc.authorName LIKE :keyword ESCAPE '!' OR department.name LIKE :keyword ESCAPE '!' OR documentType.name LIKE :keyword ESCAPE '!' OR documentType.code LIKE :keyword ESCAPE '!' OR uploader.fullName LIKE :keyword ESCAPE '!' OR uploader.email LIKE :keyword ESCAPE '!' OR EXISTS (SELECT 1 FROM document_tags search_dt INNER JOIN tags search_tag ON search_tag.id = search_dt.tag_id WHERE search_dt.document_id = doc.id AND search_tag.name LIKE :keyword ESCAPE '!'))".replaceAll(':keyword', ':' + parameter), { [parameter]: keyword });
       });
     }
+
+    for (const field of ["summary","referenceNo","issuingUnit","organizingBody","documentNumber","securityLevel","authorName"]) {
+      const value = query[field as keyof SearchDocumentDto];
+      if (typeof value === 'string' && value.trim()) {
+        qb.andWhere(`doc.${field} LIKE :metadata_${field} ESCAPE '!'`, {
+          [`metadata_${field}`]: '%' + value.trim().replace(/[!%_]/g, '!$&') + '%',
+        });
+      }
+    }
+    if (query.receivedDate) qb.andWhere('doc.receivedDate = :receivedDate', { receivedDate: query.receivedDate });
+    if (query.documentDate) qb.andWhere('doc.documentDate = :documentDate', { documentDate: query.documentDate });
 
     // ─── Bộ lọc nâng cao ───────────────────────────────────────
     if (query.dateFrom) {
@@ -644,6 +694,7 @@ export class DocumentsService {
       });
     }
 
+    applyDocumentSecurityScope(qb, user);
     qb.orderBy('doc.createdAt', 'DESC');
 
     // ─── Pagination ────────────────────────────────────────────
@@ -736,6 +787,7 @@ export class DocumentsService {
     const doc = await this.getOrFail(id);
 
     const isOwner = doc.uploader && (doc.uploader as any).id === user.id;
+    assertDocumentSecurityAccess(doc, user);
     const isAdmin = user.role === UserRole.ADMIN;
     const isSameDept = doc.department?.id === user.departmentId;
 
@@ -745,7 +797,9 @@ export class DocumentsService {
 
     if (isAdmin)                                      canAccess = true;
     else if (vis === DocumentVisibility.PUBLIC)       canAccess = true;
-    else if (vis === DocumentVisibility.DEPARTMENT)   canAccess = isOwner || isSameDept;
+    else if (vis === DocumentVisibility.DEPARTMENT) {
+      canAccess = isOwner || (user.role === UserRole.DEPARTMENT_HEAD && isSameDept);
+    }
     else if (vis === DocumentVisibility.PRIVATE)      canAccess = isOwner;
     else                                              canAccess = isOwner || isSameDept;
 
@@ -753,7 +807,7 @@ export class DocumentsService {
       throw new ForbiddenException('Bạn không có quyền truy cập tài liệu này');
     }
 
-    const canViewPending = isAdmin ||
+    const canViewPending = isOwner || isAdmin ||
       (user.role === UserRole.DEPARTMENT_HEAD && isSameDept);
     const isPublished =
       doc.status === DocumentStatus.STORED || doc.status === DocumentStatus.APPROVED;
@@ -795,6 +849,7 @@ export class DocumentsService {
   }
 
   async getFileForView(doc: Document, user: AuthUser) {
+    assertDocumentSecurityAccess(doc, user);
     const storagePath = doc.file?.storageKey ?? doc.storagePath;
     const absPath = path.isAbsolute(storagePath)
       ? storagePath
@@ -815,7 +870,7 @@ export class DocumentsService {
     return {
       path: absPath,
       filename: doc.originalFilename,
-      mimeType: doc.file?.mimeType ?? 'application/pdf',
+      mimeType: doc.file?.mimeType ?? inferMimeType(doc.originalFilename),
     };
   }
 
@@ -839,6 +894,18 @@ export class DocumentsService {
   ): Promise<Document> {
     const doc = await this.getOrFail(id);
 
+    assertDocumentSecurityAccess(doc, actor);
+    if (actor.role !== UserRole.ADMIN && (
+      actor.role !== UserRole.DEPARTMENT_HEAD || !actor.departmentId || doc.department?.id !== actor.departmentId
+    )) {
+      throw new ForbiddenException('Bạn chỉ được cập nhật tài liệu trong khoa mình');
+    }
+    if (actor.role !== UserRole.ADMIN && dto.departmentId !== undefined && dto.departmentId !== actor.departmentId) {
+      throw new ForbiddenException('Chỉ Admin được chuyển tài liệu sang khoa khác');
+    }
+    const nextSecurityLevel = dto.securityLevel !== undefined ? normalizeDocumentSecurityLevel(dto.securityLevel) : undefined;
+    if (nextSecurityLevel !== undefined) assertSecurityLevelChange(doc, nextSecurityLevel, actor);
+
     if (dto.title !== undefined) doc.title = dto.title;
     if (dto.summary !== undefined) doc.summary = dto.summary;
     if (dto.referenceNo !== undefined) doc.referenceNo = dto.referenceNo;
@@ -846,7 +913,7 @@ export class DocumentsService {
     if (dto.organizingBody !== undefined) doc.organizingBody = dto.organizingBody;
     if (dto.receivedDate !== undefined) doc.receivedDate = dto.receivedDate ? new Date(dto.receivedDate) as any : null as any;
     if (dto.documentNumber !== undefined) doc.documentNumber = dto.documentNumber;
-    if (dto.securityLevel !== undefined) doc.securityLevel = dto.securityLevel;
+    if (nextSecurityLevel !== undefined) doc.securityLevel = nextSecurityLevel;
     if (dto.authorName !== undefined) doc.authorName = dto.authorName;
     if (dto.description !== undefined) doc.description = dto.description;
     if (dto.departmentId !== undefined) {
@@ -905,8 +972,10 @@ export class DocumentsService {
 
   // ─── COMMENTS ─────────────────────────────────────────────
   async addComment(docId: string, content: string, user: AuthUser): Promise<DocumentComment> {
-    // Kiểm tra document tồn tại và user có quyền xem
-    await this.getOrFail(docId);
+    if (user.role === UserRole.USER && !(user.permissions ?? []).includes(UserPermission.ADD_DOCUMENT_COMMENTS)) {
+      throw new ForbiddenException('Bạn chưa được cấp quyền thêm ghi chú tài liệu');
+    }
+    await this.getDetail(docId, user);
 
     const comment = this.commentRepo.create({
       document: { id: docId } as any,
@@ -917,7 +986,7 @@ export class DocumentsService {
   }
 
   async getComments(docId: string, user: AuthUser): Promise<DocumentComment[]> {
-    await this.getOrFail(docId);
+    await this.getDetail(docId, user);
 
     return this.commentRepo.find({
       where: { document: { id: docId } },
@@ -927,6 +996,7 @@ export class DocumentsService {
   }
 
   async deleteComment(docId: string, commentId: string, user: AuthUser): Promise<void> {
+    await this.getDetail(docId, user);
     const comment = await this.commentRepo.findOne({
       where: { id: commentId, document: { id: docId } },
       relations: ['author'],
@@ -958,7 +1028,7 @@ export class DocumentsService {
         .andWhere('scopeUploader.id = :userId', { userId: user.id });
     }
 
-    return qb;
+    return applyDocumentSecurityScope(qb, user);
   }
 
   private assertYear(year: string) {
@@ -976,6 +1046,33 @@ export class DocumentsService {
     if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) {
       throw new BadRequestException('Ngay khong ton tai');
     }
+  }
+
+  async getDetail(id: string, user: AuthUser) {
+    const doc = await this.docsRepo.findOne({
+      where: { id },
+      relations: ['uploader', 'department', 'approvedBy', 'documentType', 'tags'],
+      select: {
+        uploader: { id: true, fullName: true, email: true },
+        approvedBy: { id: true, fullName: true, email: true },
+      },
+    });
+    if (!doc) throw new NotFoundException('Không tìm thấy tài liệu');
+
+    assertDocumentSecurityAccess(doc, user);
+
+    const isOwner = doc.uploader?.id === user.id;
+    const isPublished = doc.status === DocumentStatus.STORED || doc.status === DocumentStatus.APPROVED;
+    const isPublic = doc.visibility === DocumentVisibility.PUBLIC && isPublished;
+    const isSameDepartment = doc.visibility === DocumentVisibility.DEPARTMENT
+      && !!user.departmentId && doc.department?.id === user.departmentId;
+    if (user.role !== UserRole.ADMIN && !isOwner && !isPublic && !isSameDepartment && !canReviewDocument(doc, user)) {
+      throw new ForbiddenException('Không có quyền xem thông tin tài liệu này');
+    }
+
+    // These are server-side file locations, not document metadata.
+    const { storagePath, ...detail } = doc;
+    return { ...detail, tags: (doc.tags || []).map(tag => tag.name) };
   }
 
   private async getOrFail(id: string): Promise<Document> {

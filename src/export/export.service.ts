@@ -6,6 +6,7 @@ import PDFDocument from 'pdfkit';
 import { PassThrough } from 'stream';
 import { Document, DocumentStatus } from '../entities/document.entity';
 import { UserRole } from '../entities/user.entity';
+import { applyDocumentSecurityScope } from '../common/document-security';
 
 interface AuthUser {
   id: string;
@@ -55,6 +56,7 @@ export class ExportService {
       qb.andWhere('doc.createdAt <= :dateTo', { dateTo: end });
     }
 
+    applyDocumentSecurityScope(qb, user);
     qb.orderBy('doc.createdAt', 'DESC');
     return qb.getMany();
   }

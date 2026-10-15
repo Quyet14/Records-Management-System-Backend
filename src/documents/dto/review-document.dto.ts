@@ -1,4 +1,4 @@
-import { IsDateString, IsNumberString, IsOptional, IsPositive, IsString, IsUUID, IsInt } from 'class-validator';
+import { IsDateString, IsNumberString, IsOptional, IsPositive, IsString, IsUUID, IsInt, IsIn } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class RejectDocumentDto {
@@ -21,6 +21,47 @@ export class PendingQueueDto {
 }
 
 export class SearchDocumentDto {
+  // Only search screens request the potentially large OCR description.
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  includeContent?: string;
+
+  @IsOptional()
+  @IsString()
+  summary?: string;
+
+  @IsOptional()
+  @IsString()
+  referenceNo?: string;
+
+  @IsOptional()
+  @IsString()
+  issuingUnit?: string;
+
+  @IsOptional()
+  @IsString()
+  organizingBody?: string;
+
+  @IsOptional()
+  @IsString()
+  documentNumber?: string;
+
+  @IsOptional()
+  @IsString()
+  securityLevel?: string;
+
+  @IsOptional()
+  @IsString()
+  authorName?: string;
+
+  @IsOptional()
+  @IsDateString()
+  receivedDate?: string;
+
+  @IsOptional()
+  @IsDateString()
+  documentDate?: string;
+
   @IsOptional()
   @IsString()
   keyword?: string;
