@@ -1,0 +1,33 @@
+{
+  "version": "REPLACE_WITH_APPROVED_POLICY_VERSION",
+  "inventoryScope": "database-files-only",
+  "targets": [
+    {
+      "key": "external",
+      "label": "Ổ sao lưu ngoài",
+      "root": "REPLACE_WITH_EXISTING_EXTERNAL_BACKUP_ROOT",
+      "purgeWithinDays": null,
+      "versioning": "none",
+      "authoritative": false,
+      "notes": "Điền hạn xóa đã phê duyệt; xác nhận đây là đúng kho và không có version/snapshot ẩn."
+    },
+    {
+      "key": "cloud",
+      "label": "Cloud",
+      "root": "REPLACE_WITH_AUTHORITATIVE_CLOUD_MOUNT_ROOT",
+      "purgeWithinDays": null,
+      "versioning": "none",
+      "authoritative": false,
+      "notes": "Chỉ dùng mount có thẩm quyền, không phải cache đồng bộ; nếu cloud có version/thùng rác ẩn, dùng adapter gateway hỗ trợ provider đó."
+    },
+    {
+      "key": "nas",
+      "label": "NAS",
+      "root": "REPLACE_WITH_EXISTING_NAS_UNC_OR_MOUNT_ROOT",
+      "purgeWithinDays": null,
+      "versioning": "none",
+      "authoritative": false,
+      "notes": "Khai báo thư mục gồm mọi bản sao theo cấu trúc mirror; snapshot NAS ẩn chưa được hỗ trợ bởi filesystem provider."
+    }
+  ]
+}

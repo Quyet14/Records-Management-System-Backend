@@ -18,6 +18,7 @@ import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { UserRole } from '../entities/user.entity';
+import { ProfileSecurityAuthGuard, RecentAuthGuard } from '../common/guards/recent-auth.guard';
 
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('users')
@@ -51,6 +52,7 @@ export class UsersController {
   }
 
   @Patch(':id/role')
+  @UseGuards(RecentAuthGuard)
   @Roles(UserRole.ADMIN, UserRole.DEPARTMENT_HEAD)
   updateRole(
     @Param('id') id: string,
@@ -61,6 +63,7 @@ export class UsersController {
   }
 
   @Patch(':id/permissions')
+  @UseGuards(RecentAuthGuard)
   @Roles(UserRole.ADMIN, UserRole.DEPARTMENT_HEAD)
   updatePermissions(
     @Param('id') id: string,
@@ -72,6 +75,7 @@ export class UsersController {
 
   /** PATCH /users/:id — Admin sửa thông tin đầy đủ, user thường sửa profile của mình */
   @Patch(':id')
+  @UseGuards(ProfileSecurityAuthGuard)
   updateProfile(
     @Param('id') id: string,
     @Body() dto: UpdateUserDto,
@@ -85,6 +89,7 @@ export class UsersController {
   }
 
   @Patch(':id/active')
+  @UseGuards(RecentAuthGuard)
   @Roles(UserRole.ADMIN, UserRole.DEPARTMENT_HEAD)
   setActive(
     @Param('id') id: string,

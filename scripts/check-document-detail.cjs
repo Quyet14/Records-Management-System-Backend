@@ -9,7 +9,7 @@ require('dotenv').config({ path: path.join(root, '.env'), quiet: true });
 async function main() {
   const id = process.argv[2];
   if (!id || id === '--help') {
-    console.log('Usage: node scripts/check-document-detail.cjs <document-uuid>');
+    console.log('Usage: node scripts/check-document-detail.cjs <document-uuid> [--storage]');
     console.log('Checks the local API, compiled route and database without changing data.');
     return;
   }
@@ -17,19 +17,22 @@ async function main() {
     throw new Error('Document ID must be a UUID.');
   }
 
-  const controller = path.join(root, 'dist/documents/documents.controller.js');
-  console.log('BUILD:', fs.existsSync(controller) && /prototype, "getDetail"/.test(fs.readFileSync(controller, 'utf8'))
-    ? 'GET /documents/:id exists in dist.'
-    : 'Detail route missing from dist. Deploy updated source and run npm run build.');
+  const storageOnly = process.argv.includes('--storage');
+  if (!storageOnly) {
+    const controller = path.join(root, 'dist/documents/documents.controller.js');
+    console.log('BUILD:', fs.existsSync(controller) && /prototype, "getDetail"/.test(fs.readFileSync(controller, 'utf8'))
+      ? 'GET /documents/:id exists in dist.'
+      : 'Detail route missing from dist. Deploy updated source and run npm run build.');
 
-  const url = `http://127.0.0.1:${process.env.PORT || 3002}/documents/${id}`;
-  try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
-    console.log('LOCAL API:', response.status, response.status === 401
-      ? '(route responds; login required as expected)'
-      : (await response.text()).slice(0, 600));
-  } catch (error) {
-    console.log('LOCAL API:', error.cause?.code || error.message);
+    const url = `http://127.0.0.1:${process.env.PORT || 3002}/documents/${id}`;
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      console.log('LOCAL API:', response.status, response.status === 401
+        ? '(route responds; login required as expected)'
+        : (await response.text()).slice(0, 600));
+    } catch (error) {
+      console.log('LOCAL API:', error.cause?.code || error.message);
+    }
   }
 
   require('reflect-metadata');
@@ -55,6 +58,34 @@ async function main() {
   try {
     await ds.initialize();
     const { Document } = require(path.join(entityDir, 'document.entity.js'));
+    if (storageOnly) {
+      const doc = await ds.getRepository(Document).findOne({ where: { id }, relations: ['file'] });
+      if (!doc) throw Error('Document not found.');
+      console.log(`DOCUMENT: ${doc.id} | status=${doc.status}`);
+      console.log(`DOCUMENT_CREATED: ${doc.createdAt?.toISOString?.() || doc.createdAt}`);
+      console.log(`APPROVED: ${doc.approvedAt?.toISOString?.() || doc.approvedAt || '(not approved)'}`);
+      console.log(`FILE_RECORD_CREATED: ${doc.file?.createdAt?.toISOString?.() || doc.file?.createdAt || '(no file record)'}`);
+      const effectivePath = doc.file?.storageKey || doc.storagePath;
+      const checks = [['storage_path', doc.storagePath], ['storage_key', doc.file?.storageKey]];
+      let effectiveFound = false;
+      for (const [label, filename] of checks) {
+        console.log(`${label}: ${filename || '(empty)'}`);
+        if (!filename) continue;
+        try {
+          const stat = await fs.promises.stat(filename);
+          console.log(`  EXISTS=${stat.isFile()} | BYTES=${stat.size} | MODIFIED=${stat.mtime.toISOString()}`);
+          if (filename === effectivePath && stat.isFile()) {
+            effectiveFound = true;
+            if (doc.fileSizeBytes != null && stat.size !== Number(doc.fileSizeBytes)) {
+              console.log('  SIZE_MISMATCH: database and disk differ.'); process.exitCode = 1;
+            }
+          }
+        } catch (error) { console.log(`  EXISTS=false | ERROR=${error.code || error.name}`); }
+      }
+      if (!effectiveFound) { console.log('MISSING: effective file path is unavailable to this server account.'); process.exitCode = 1; }
+      else console.log('FOUND: open the full storage_key (or storage_path if no file record) shown above. Old modification time can be normal for reused content.');
+      return;
+    }
     const { DocumentsService } = require(path.join(root, 'dist/documents/documents.service.js'));
     if (typeof DocumentsService.prototype.getDetail !== 'function') {
       throw new Error('getDetail missing from compiled service. Deploy and rebuild backend.');

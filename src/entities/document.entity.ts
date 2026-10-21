@@ -19,6 +19,7 @@ export enum DocumentStatus {
   APPROVED = 'approved',
   REJECTED = 'rejected',
   STORED = 'stored',
+  DESTROYED = 'destroyed',
 }
 
 /** Phạm vi hiển thị tài liệu */
@@ -51,6 +52,21 @@ export enum ReviewStatus {
 
 @Entity('documents')
 export class Document {
+  @Column({ name: 'retention_until', type: 'datetime', precision: 3, nullable: true })
+  retentionUntil: Date | null;
+
+  @Column({ name: 'legal_hold', default: false })
+  legalHold: boolean;
+
+  @Column({ name: 'destroyed_at', type: 'datetime', precision: 3, nullable: true })
+  destroyedAt: Date | null;
+
+  @Column({ name: 'destruction_started_at', type: 'datetime', precision: 3, nullable: true })
+  destructionStartedAt: Date | null;
+
+  @Column({ name: 'destruction_request_id', type: 'varchar', length: 36, nullable: true })
+  destructionRequestId: string | null;
+
   @PrimaryGeneratedColumn('uuid')
   id: string;
 

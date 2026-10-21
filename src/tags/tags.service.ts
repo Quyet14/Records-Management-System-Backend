@@ -81,6 +81,7 @@ export class TagsService {
       .leftJoinAndSelect('doc.department', 'department')
       .leftJoinAndSelect('doc.tags', 'allTags')
       .orderBy('doc.createdAt', 'DESC');
+    qb.andWhere("doc.status != 'destroyed' AND doc.destructionStartedAt IS NULL");
     return applyDocumentSecurityScope(qb, user).getMany();
   }
 
@@ -93,6 +94,7 @@ export class TagsService {
       .leftJoinAndSelect('doc.department', 'department')
       .leftJoinAndSelect('doc.tags', 'allTags')
       .orderBy('doc.createdAt', 'DESC');
+    qb.andWhere("doc.status != 'destroyed' AND doc.destructionStartedAt IS NULL");
     return applyDocumentSecurityScope(qb, user).getMany();
   }
 }

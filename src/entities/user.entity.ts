@@ -15,6 +15,7 @@ export enum UserRole {
 }
 
 export enum UserPermission {
+  APPROVE_SENSITIVE_DESTRUCTION = 'approve_sensitive_destruction',
   APPROVE_DOCUMENTS = 'approve_documents',
   REQUEST_DOCUMENT_VIEW = 'request_document_view',
   VIEW_DEPARTMENT_DOCUMENTS = 'view_department_documents',
@@ -49,6 +50,9 @@ export class User {
 
   @Column({ name: 'is_active', default: true })
   isActive: boolean;
+
+  @Column({ name: 'failed_auth_attempts', type: 'int', default: 0 }) failedAuthAttempts: number;
+  @Column({ name: 'auth_locked_until', type: 'datetime', precision: 3, nullable: true }) authLockedUntil: Date | null;
 
   @Column({ name: 'must_change_password', default: false })
   mustChangePassword: boolean;

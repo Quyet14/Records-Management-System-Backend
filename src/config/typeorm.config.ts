@@ -17,6 +17,10 @@ import { LoginConfirmation } from '../entities/login-confirmation.entity';
 import { PasswordResetToken } from '../entities/password-reset-token.entity';
 import { ViewRequest } from '../entities/view-request.entity';
 import { AccessLog } from '../entities/access-log.entity';
+import { destructionEntities } from '../entities/destruction.entity';
+import { AuthSession } from '../entities/auth-session.entity';
+import { AuthCaptcha } from '../entities/auth-captcha.entity';
+import { AuditContextSubscriber } from '../security/request-audit';
 
 export default registerAs(
   'database',
@@ -33,9 +37,12 @@ export default registerAs(
       waitForConnections: true,
       queueLimit: 0,
     },
-    entities: [User, Department, Document, DocumentVersion, AuditLog, Tag, RefreshToken, Notification, DocumentComment, DocumentType, OtpCode, PersonalFile, StoredFile, LoginConfirmation, PasswordResetToken, ViewRequest, AccessLog],
+    timezone: 'Z',
+    entities: [User, Department, Document, DocumentVersion, AuditLog, Tag, RefreshToken, AuthSession, AuthCaptcha, Notification, DocumentComment, DocumentType, OtpCode, PersonalFile, StoredFile, LoginConfirmation, PasswordResetToken, ViewRequest, AccessLog, ...destructionEntities],
+    subscribers: [AuditContextSubscriber],
     // Không tự thay đổi schema trên server; dùng migration hoặc SQL riêng để cập nhật database.
     synchronize: process.env.DB_SYNCHRONIZE === 'true',
-    logging: process.env.NODE_ENV !== 'production',
+    // Queries may contain evidence PDF bytes and OTP verifier data. Never log SQL parameters.
+    logging: false,
   }),
 );

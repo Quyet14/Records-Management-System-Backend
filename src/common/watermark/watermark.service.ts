@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { PDFDocument, rgb, StandardFonts, degrees } from 'pdf-lib';
 import * as fs from 'fs';
 import * as nodePath from 'path';
@@ -27,8 +27,7 @@ export class WatermarkService {
       return await this.embedWatermark(originalBytes, options);
     } catch (err) {
       this.logger.error(`Không thể chèn watermark cho ${absPath}: ${(err as Error).message}`);
-      // Fallback: trả file gốc không watermark
-      return fs.readFileSync(absPath);
+      throw new ServiceUnavailableException('Không thể tạo bản xem có watermark.');
     }
   }
 
@@ -38,13 +37,11 @@ export class WatermarkService {
 
   // ─── Private ─────────────────────────────────────────────
 
-  private async embedWatermark(
+  async embedWatermark(
     pdfBytes: Uint8Array,
     options: WatermarkOptions,
   ): Promise<Buffer> {
-    const pdfDoc = await PDFDocument.load(pdfBytes, {
-      ignoreEncryption: true,
-    });
+    const pdfDoc = await PDFDocument.load(pdfBytes);
 
     // Dùng Helvetica — font Latin không hỗ trợ tiếng Việt
     // Chuyển tên/email sang ASCII để tránh lỗi encode

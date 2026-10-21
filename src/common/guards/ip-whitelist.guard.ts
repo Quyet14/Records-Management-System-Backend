@@ -16,7 +16,7 @@ import { Request } from 'express';
  *
  * - Nếu IP_WHITELIST không được set hoặc rỗng → cho phép tất cả (tương thích ngược).
  * - Hỗ trợ: IPv4 đơn, IPv6 đơn, CIDR IPv4 (ví dụ 192.168.1.0/24).
- * - Lấy IP thực từ X-Forwarded-For (khi đứng sau Nginx reverse proxy).
+ * - Dùng IP đã được Express xác định qua TRUST_PROXY_CIDRS.
  */
 @Injectable()
 export class IpWhitelistGuard implements CanActivate {
@@ -53,13 +53,7 @@ export class IpWhitelistGuard implements CanActivate {
   // ─── Helpers ─────────────────────────────────────────────
 
   private extractIp(req: Request): string {
-    // X-Forwarded-For: client, proxy1, proxy2 — lấy phần tử đầu tiên
-    const forwarded = req.headers['x-forwarded-for'];
-    if (forwarded) {
-      const first = Array.isArray(forwarded) ? forwarded[0] : forwarded;
-      return first.split(',')[0].trim();
-    }
-    return req.socket?.remoteAddress ?? req.ip ?? '';
+    return req.ip ?? req.socket?.remoteAddress ?? '';
   }
 
   private matchIp(ip: string, entry: string): boolean {
@@ -76,8 +70,10 @@ export class IpWhitelistGuard implements CanActivate {
   private matchCidr(ip: string, cidr: string): boolean {
     try {
       const [range, bitsStr] = cidr.split('/');
-      const bits = parseInt(bitsStr, 10);
-      const mask = ~(0xffffffff >>> bits) >>> 0;
+      if (!/^\d{1,2}$/.test(bitsStr)) return false;
+      const bits = Number(bitsStr);
+      if (bits < 0 || bits > 32) return false;
+      const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
 
       const ipNum = this.ipToNum(ip);
       const rangeNum = this.ipToNum(range);
@@ -91,7 +87,7 @@ export class IpWhitelistGuard implements CanActivate {
 
   private ipToNum(ip: string): number | null {
     const parts = ip.split('.').map(Number);
-    if (parts.length !== 4 || parts.some((p) => isNaN(p) || p < 0 || p > 255)) {
+    if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) {
       return null;
     }
     return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;

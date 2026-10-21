@@ -11,10 +11,13 @@ import { PasswordResetToken } from '../entities/password-reset-token.entity';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtStrategy } from './jwt.strategy';
+import { AuthSession } from '../entities/auth-session.entity';
+import { AuthCaptcha } from '../entities/auth-captcha.entity';
+import { AuthOriginGuard } from './auth-origin.guard';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([User, RefreshToken, OtpCode, LoginConfirmation, PasswordResetToken]),
+    TypeOrmModule.forFeature([User, RefreshToken, AuthSession, AuthCaptcha, OtpCode, LoginConfirmation, PasswordResetToken]),
     PassportModule,
     ConfigModule,
     JwtModule.registerAsync({
@@ -22,11 +25,11 @@ import { JwtStrategy } from './jwt.strategy';
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
         secret: config.get<string>('JWT_SECRET'),
-        signOptions: { expiresIn: '15m' },
+        signOptions: { expiresIn: '20m' },
       }),
     }),
   ],
-  providers: [AuthService, JwtStrategy],
+  providers: [AuthService, JwtStrategy, AuthOriginGuard],
   controllers: [AuthController],
   exports: [AuthService, JwtModule],
 })

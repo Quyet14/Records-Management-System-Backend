@@ -1,0 +1,31 @@
+{
+  "version": "REPLACE_WITH_APPROVED_POLICY_VERSION",
+  "inventoryScope": "database-files-only",
+  "targets": [
+    {
+      "key": "external",
+      "label": "Backup trên ổ đĩa",
+      "root": "REPLACE_WITH_EXISTING_BACKUP_ROOT",
+      "purgeWithinDays": null,
+      "versioning": "none",
+      "authoritative": false,
+      "notes": "Khai báo đúng kho backup riêng, không trùng file gốc; xác nhận phạm vi và hạn xóa trước khi bật."
+    },
+    {
+      "key": "cloud",
+      "label": "Cloud — không sử dụng",
+      "enabled": false,
+      "root": "",
+      "purgeWithinDays": 0,
+      "notes": "Không có bản sao nội dung trên cloud; chỉ dùng cấu hình này sau khi xác nhận thực tế."
+    },
+    {
+      "key": "nas",
+      "label": "NAS — không sử dụng",
+      "enabled": false,
+      "root": "",
+      "purgeWithinDays": 0,
+      "notes": "Không có bản sao nội dung trên NAS; chỉ dùng cấu hình này sau khi xác nhận thực tế."
+    }
+  ]
+}

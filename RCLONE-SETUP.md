@@ -121,6 +121,8 @@ rclone copy gdrive:files ./storage/archive
 
 ## Lưu ý quan trọng
 
+- Khi đã có đề nghị hủy hồ sơ, backup/restore phải theo [quy trình tombstone và barrier](docs/destruction-workflow.md). Các lệnh restore thủ công ở trên chỉ dùng cho dữ liệu chưa có lịch sử hủy hoặc trong vùng bảo trì cách ly; trước khi mở lại ứng dụng phải áp và xác minh tombstone từ gateway. Không khởi động lại app ngay sau restore để bỏ qua bước này.
+
 - Vì yêu cầu pháp lý là lưu trữ **nhiều năm không được mất**, nên định kỳ **(3–6 tháng/lần)** thử khôi phục thật (restore vào môi trường test) để chắc chắn bản backup dùng được — backup chưa từng thử khôi phục không đáng tin cậy.
 - Mật khẩu DB trong `.env` không nên commit vào git — đảm bảo `.env` đã có trong `.gitignore`.
 - Script dùng `--single-transaction` khi dump để không lock bảng, an toàn khi app đang chạy.

@@ -1,0 +1,3 @@
+# Apache/XAMPP must never serve the NestJS source, .env, journals or document files directly.
+# NestJS HTTP API on its configured port is unaffected by this Apache directory rule.
+Require all denied

@@ -33,6 +33,9 @@ export class PersonalFile {
   @Column({ name: 'mime_type', length: 100, nullable: true })
   mimeType: string;
 
+  @Column({ name: 'sha256_checksum', type: 'varchar', length: 64, nullable: true })
+  sha256Checksum: string | null;
+
   /** Mô tả tùy chọn */
   @Column({ type: 'text', nullable: true })
   description: string;

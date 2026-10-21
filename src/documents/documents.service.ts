@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -31,7 +32,10 @@ import {
   applyDocumentSecurityScope, assertDocumentSecurityAccess, assertSecurityLevelChange,
   normalizeDocumentSecurityLevel,
 } from '../common/document-security';
-import { getNormalizedExt, inferMimeType } from './allowed-file-types';
+import { getNormalizedExt, inferMimeType, isPdfFile } from './allowed-file-types';
+import { assertDocumentContentAvailable, assertDocumentMutable } from '../common/document-lifecycle';
+import { archiveChecksum, encryptArchiveFile, encryptionEnabled } from '../common/archive-crypto';
+import { inspectUpload } from '../common/upload-inspection';
 
 interface AuthUser {
   id: string;
@@ -40,6 +44,8 @@ interface AuthUser {
   permissions?: UserPermission[];
   fileId?: string;
   tokenType?: string;
+  sessionId?: string;
+  sessionExpiresAt?: Date;
 }
 
 @Injectable()
@@ -94,18 +100,21 @@ export class DocumentsService {
     ext: string,
   ): string {
     const year = new Date().getFullYear().toString();
-    const scope = departmentId || 'shared';
-    return path.join(this.archiveDir, scope, year, `${fileHash}${ext}`);
+    return path.join(this.archiveDir, year, `${crypto.randomUUID()}${encryptionEnabled() ? '.lths' : ext}`);
   }
 
   private async storePhysicalFile(
     file: Express.Multer.File,
     departmentId: string | undefined,
   ): Promise<StoredFile> {
+    await inspectUpload(file);
     const fileHash = await this.computeChecksum(file.path);
     const existing = await this.filesRepo.findOne({ where: { fileHash } });
 
     if (existing) {
+      await this.assertStoredFilePresent(existing.storageKey, file.size, fileHash);
+      if (await archiveChecksum(existing.storageKey, fileHash) !== fileHash)
+        throw new ConflictException('Checksum file đã lưu không khớp.');
       if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
       return existing;
     }
@@ -116,7 +125,8 @@ export class DocumentsService {
       getNormalizedExt(file.originalname),
     );
     await this.withRetry(() => fs.mkdirSync(path.dirname(storageKey), { recursive: true }));
-    await this.withRetry(() => fs.renameSync(file.path, storageKey));
+    await encryptArchiveFile(file.path, storageKey, fileHash);
+    await fs.promises.unlink(file.path);
 
     return this.filesRepo.save(this.filesRepo.create({
       fileHash,
@@ -124,6 +134,38 @@ export class DocumentsService {
       size: file.size,
       mimeType: inferMimeType(file.originalname, file.mimetype),
     }));
+  }
+
+  private async assertStoredFilePresent(filename: string, expectedSize?: number | null, expectedHash?: string): Promise<void> {
+    let stat: fs.Stats;
+    try { stat = await fs.promises.stat(filename); }
+    catch (error) {
+      if (!['ENOENT', 'ENOTDIR'].includes(error?.code)) throw error;
+      throw new ConflictException({ code: 'STORED_FILE_MISSING',
+        message: 'Database có bản ghi file nhưng file trên ổ lưu trữ không còn tồn tại. Cần kiểm tra kho lưu trữ trước khi tải lại hoặc phê duyệt.' });
+    }
+    // Encrypted containers include headers/tags, so physical size is not plaintext size.
+    const encrypted = path.extname(filename) === '.lths';
+    if (!stat.isFile() || (!encrypted && expectedSize != null && Number.isFinite(Number(expectedSize)) && stat.size !== Number(expectedSize)))
+      throw new ConflictException({ code: 'STORED_FILE_SIZE_MISMATCH',
+        message: 'File trên ổ lưu trữ không khớp dung lượng đã ghi nhận. Cần kiểm tra kho lưu trữ trước khi tiếp tục.' });
+    await archiveChecksum(filename, expectedHash);
+  }
+
+  private async saveUploadedDocument(doc: Document): Promise<Document> {
+    try {
+      return await this.docsRepo.save(doc);
+    } catch (error) {
+      const databaseError = error?.driverError ?? error;
+      if ((databaseError?.errno === 1644 || databaseError?.code === 'ER_SIGNAL_EXCEPTION')
+        && databaseError?.sqlMessage === 'CONTENT_CLAIMED_FOR_DESTRUCTION') {
+        throw new ConflictException({
+          code: 'CONTENT_CLAIMED_FOR_DESTRUCTION',
+          message: 'Nội dung file này đang thuộc quy trình hủy hồ sơ nên không thể tải lên lại. Nếu đề nghị chưa thực hiện hủy, hãy kiểm tra và thu hồi đề nghị trước khi tải lại.',
+        });
+      }
+      throw error;
+    }
   }
 
   // ─── Bước 4: Ghi log ngày dạng TSV — chiếm dung lượng nhỏ nhất ─
@@ -186,6 +228,7 @@ export class DocumentsService {
     user: AuthUser,
     securityLevel?: string,
   ): Promise<{ success: Document[]; failed: { filename: string; error: string }[] }> {
+    departmentId = this.uploadDepartment(departmentId, user);
     const normalizedSecurityLevel = normalizeDocumentSecurityLevel(securityLevel);
     const success: Document[] = [];
     const failed: { filename: string; error: string }[] = [];
@@ -206,7 +249,7 @@ export class DocumentsService {
           sha256Checksum: storedFile.fileHash,
           file: storedFile,
         });
-        const saved = await this.docsRepo.save(doc);
+        const saved = await this.saveUploadedDocument(doc);
         await this.log(user.id, 'upload', saved.id, { filename: file.originalname });
         this.eventEmitter.emit('document.uploaded', {
           documentId: saved.id,
@@ -233,6 +276,7 @@ export class DocumentsService {
     dto: UploadDocumentDto,
     user: AuthUser,
   ): Promise<Document> {
+    dto.departmentId = this.uploadDepartment(dto.departmentId, user);
     const securityLevel = normalizeDocumentSecurityLevel(dto.securityLevel);
     const visibility = dto.visibility ?? DocumentVisibility.DEPARTMENT;
     console.log(`[upload] visibility received: "${dto.visibility}" → using: "${visibility}"`);
@@ -240,8 +284,9 @@ export class DocumentsService {
     // Auto-approve nếu: visibility=private HOẶC frontend gửi autoApprove=true
     const shouldAutoApprove =
       visibility === DocumentVisibility.PRIVATE ||
-      dto.autoApprove === true ||
-      String(dto.autoApprove) === 'true'; // multipart gửi string
+      ((dto.autoApprove === true || String(dto.autoApprove) === 'true') && canReviewDocument({
+        department: dto.departmentId ? { id: dto.departmentId } : null, securityLevel,
+      } as Document, user));
 
     /**
      * Xử lý theo visibility:
@@ -249,7 +294,10 @@ export class DocumentsService {
      * - private             → STORED ngay, lưu thẳng vào archive (không cần duyệt)
      */
     if (shouldAutoApprove) {
-      const storedFile = await this.storePhysicalFile(file, dto.departmentId);
+      const storedFile = await this.storePhysicalFile(file, dto.departmentId).catch(error => {
+        if (file?.path) fs.rmSync(file.path, { force: true });
+        throw error;
+      });
       const archivePath = storedFile.storageKey;
       const dirPath = path.dirname(archivePath);
       const dateStr = new Date().toISOString().slice(0, 10);
@@ -280,7 +328,7 @@ export class DocumentsService {
         documentDate:       dto.documentDate ? new Date(dto.documentDate) : undefined,
         classificationValue: dto.classificationValue ?? ClassificationValue.UNCLASSIFIED,
       });
-      const saved = await this.docsRepo.save(doc);
+      const saved = await this.saveUploadedDocument(doc);
 
       this.appendDayLog(dirPath, dateStr, {
         action:        'auto-approve (private)',
@@ -295,7 +343,10 @@ export class DocumentsService {
       return saved;
     }
 
-    const storedFile = await this.storePhysicalFile(file, dto.departmentId);
+    const storedFile = await this.storePhysicalFile(file, dto.departmentId).catch(error => {
+      if (file?.path) fs.rmSync(file.path, { force: true });
+      throw error;
+    });
 
     // public hoặc department → PENDING như bình thường
     const doc = this.docsRepo.create({
@@ -322,7 +373,7 @@ export class DocumentsService {
       documentDate:       dto.documentDate ? new Date(dto.documentDate) : undefined,
       classificationValue: dto.classificationValue ?? ClassificationValue.UNCLASSIFIED,
     });
-    const saved = await this.docsRepo.save(doc);
+    const saved = await this.saveUploadedDocument(doc);
 
     await this.log(user.id, 'upload', saved.id, { filename: file.originalname });
 
@@ -340,6 +391,7 @@ export class DocumentsService {
   // ─── DUYỆT (Admin hoặc Trưởng Khoa trong khoa mình) ──────────
   async approve(id: string, actor: AuthUser): Promise<Document> {
     const doc = await this.getOrFail(id);
+    assertDocumentMutable(doc);
     if (!canReviewDocument(doc, actor)) {
       throw new ForbiddenException('Bạn không có quyền phê duyệt tài liệu này');
     }
@@ -361,21 +413,27 @@ export class DocumentsService {
       }
     }
 
-    let checksum = doc.sha256Checksum;
+    let checksum = doc.sha256Checksum || doc.file?.fileHash;
     let archivePath = doc.file?.storageKey || doc.storagePath;
     let dirPath = path.dirname(archivePath);
     const dateStr = new Date().toISOString().slice(0, 10);
 
     if (!doc.file) {
       checksum = checksum || await this.computeChecksum(doc.storagePath);
-      archivePath = this.buildContentAddressedLocation(
-        doc.department?.id,
-        checksum,
-        getNormalizedExt(doc.originalFilename),
-      );
-      dirPath = path.dirname(archivePath);
-      await this.withRetry(() => fs.mkdirSync(dirPath, { recursive: true }));
-      await this.withRetry(() => fs.renameSync(doc.storagePath, archivePath));
+      if (path.extname(doc.storagePath) === '.lths') {
+        // Imports and converted legacy documents may have no files row yet.
+        // Their container is already encrypted; never encrypt ciphertext as plaintext.
+        archivePath = doc.storagePath;
+        await archiveChecksum(archivePath, checksum);
+      } else {
+        await inspectUpload({ path: doc.storagePath, originalname: doc.originalFilename,
+          size: Number(doc.fileSizeBytes), mimetype: inferMimeType(doc.originalFilename) } as Express.Multer.File);
+        archivePath = this.buildContentAddressedLocation(doc.department?.id, checksum, getNormalizedExt(doc.originalFilename));
+        dirPath = path.dirname(archivePath);
+        await this.withRetry(() => fs.mkdirSync(dirPath, { recursive: true }));
+        await encryptArchiveFile(doc.storagePath, archivePath, checksum);
+        await fs.promises.unlink(doc.storagePath);
+      }
       doc.file = await this.filesRepo.save(this.filesRepo.create({
         fileHash: checksum,
         storageKey: archivePath,
@@ -383,6 +441,8 @@ export class DocumentsService {
         mimeType: inferMimeType(doc.originalFilename),
       }));
     }
+
+    await this.assertStoredFilePresent(archivePath, doc.fileSizeBytes, checksum);
 
     // Bước 3d: Cập nhật DB
     doc.status        = DocumentStatus.STORED;
@@ -434,6 +494,7 @@ export class DocumentsService {
 
   async reject(id: string, actor: AuthUser, reason: string): Promise<Document> {
     const doc = await this.getOrFail(id);
+    assertDocumentMutable(doc);
     if (!canReviewDocument(doc, actor)) {
       throw new ForbiddenException('Bạn không có quyền từ chối tài liệu này');
     }
@@ -517,6 +578,7 @@ export class DocumentsService {
       .leftJoinAndSelect('doc.documentType', 'documentType')
       .leftJoinAndSelect('doc.file', 'file')
       .where('doc.uploader_id = :userId', { userId: user.id })
+      .andWhere("doc.status != 'destroyed' AND doc.destructionStartedAt IS NULL")
       .andWhere('doc.visibility = :visibility', { visibility: DocumentVisibility.PRIVATE })
       .orderBy('doc.createdAt', 'DESC');
 
@@ -694,6 +756,7 @@ export class DocumentsService {
       });
     }
 
+    qb.andWhere("doc.status != 'destroyed' AND doc.destructionStartedAt IS NULL");
     applyDocumentSecurityScope(qb, user);
     qb.orderBy('doc.createdAt', 'DESC');
 
@@ -785,6 +848,7 @@ export class DocumentsService {
       throw new ForbiddenException('Link tải file không hợp lệ');
     }
     const doc = await this.getOrFail(id);
+    assertDocumentContentAvailable(doc);
 
     const isOwner = doc.uploader && (doc.uploader as any).id === user.id;
     assertDocumentSecurityAccess(doc, user);
@@ -840,16 +904,35 @@ export class DocumentsService {
     }
 
     await this.getFileForDownload(id, user);
-    const expiresIn = 5 * 60;
+    if (!user.sessionId) throw new ForbiddenException('Cần phiên đăng nhập hợp lệ.');
+    const expiresIn = Math.min(120, Math.floor(((user.sessionExpiresAt?.getTime() ?? Date.now() + 120000) - Date.now()) / 1000));
+    if (expiresIn < 1) throw new ForbiddenException('Phiên đã hết hạn.');
     const token = await this.jwtService.signAsync(
-      { sub: user.id, email: (user as any).email, role: user.role, departmentId: user.departmentId, fileId: id, type: 'file-download' },
+      { sub: user.id, sid: user.sessionId, email: (user as any).email, role: user.role, departmentId: user.departmentId, fileId: id, type: 'file-download' },
       { expiresIn },
     );
     return { url: `/documents/${id}/download?token=${encodeURIComponent(token)}`, expiresIn };
   }
 
+  async createViewUrl(doc: Document, user: AuthUser, accessExpiresAt?: Date) {
+    if (!user.sessionId) throw new ForbiddenException('Cần phiên đăng nhập hợp lệ.');
+    const deadline = Math.min(Date.now() + 120000, accessExpiresAt?.getTime() ?? Infinity,
+      user.sessionExpiresAt?.getTime() ?? Infinity);
+    const expiresIn = Math.floor((deadline - Date.now()) / 1000);
+    if (expiresIn < 1) throw new ForbiddenException('Quyền xem đã hết hạn.');
+    const token = await this.jwtService.signAsync({ sub: user.id, sid: user.sessionId, fileId: doc.id, type: 'file-view' }, { expiresIn });
+    await this.log(user.id, 'issue_view_link', doc.id, { expiresIn });
+    return { url: `/documents/${doc.id}/view?token=${encodeURIComponent(token)}`, expiresIn,
+      expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString() };
+  }
+
   async getFileForView(doc: Document, user: AuthUser) {
+    // Re-read after the access guard, including for previously issued links.
+    doc = await this.getOrFail(doc.id);
+    assertDocumentContentAvailable(doc);
     assertDocumentSecurityAccess(doc, user);
+    if (user.role === UserRole.USER && !isPdfFile(doc.originalFilename, doc.file?.mimeType))
+      throw new ForbiddenException('Bản xem chỉ hỗ trợ PDF. Tài khoản của bạn không có quyền tải file nén.');
     const storagePath = doc.file?.storageKey ?? doc.storagePath;
     const absPath = path.isAbsolute(storagePath)
       ? storagePath
@@ -871,6 +954,7 @@ export class DocumentsService {
       path: absPath,
       filename: doc.originalFilename,
       mimeType: doc.file?.mimeType ?? inferMimeType(doc.originalFilename),
+      checksum: doc.sha256Checksum,
     };
   }
 
@@ -893,6 +977,7 @@ export class DocumentsService {
     actor: AuthUser,
   ): Promise<Document> {
     const doc = await this.getOrFail(id);
+    assertDocumentMutable(doc);
 
     assertDocumentSecurityAccess(doc, actor);
     if (actor.role !== UserRole.ADMIN && (
@@ -938,6 +1023,7 @@ export class DocumentsService {
     actor: AuthUser,
   ): Promise<Document> {
     const doc = await this.getOrFail(id);
+    assertDocumentMutable(doc);
 
     if (dto.documentTypeId !== undefined) {
       doc.documentType = dto.documentTypeId ? ({ id: dto.documentTypeId } as any) : null;
@@ -1071,6 +1157,11 @@ export class DocumentsService {
     }
 
     // These are server-side file locations, not document metadata.
+    if (doc.status === DocumentStatus.DESTROYED) return {
+      id: doc.id, title: doc.title, originalFilename: doc.originalFilename, status: doc.status,
+      documentNumber: doc.documentNumber, fileSizeBytes: doc.fileSizeBytes, sha256Checksum: doc.sha256Checksum,
+      destroyedAt: doc.destroyedAt, destructionRequestId: doc.destructionRequestId,
+    };
     const { storagePath, ...detail } = doc;
     return { ...detail, tags: (doc.tags || []).map(tag => tag.name) };
   }
@@ -1102,6 +1193,13 @@ export class DocumentsService {
       stream.on('end', () => resolve(hash.digest('hex')));
       stream.on('error', reject);
     });
+  }
+
+  private uploadDepartment(departmentId: string | undefined, user: AuthUser): string | undefined {
+    if (user.role === UserRole.ADMIN) return departmentId;
+    if (!user.departmentId || (departmentId && departmentId !== user.departmentId))
+      throw new ForbiddenException('Chỉ được tải hồ sơ lên khoa của mình.');
+    return user.departmentId;
   }
 
   private async log(

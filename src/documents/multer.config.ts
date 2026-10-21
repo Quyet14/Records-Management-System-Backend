@@ -25,5 +25,6 @@ export const multerOptions = {
   },
   limits: {
     fileSize: MAX_UPLOAD_FILE_SIZE_BYTES,
+    files: 20, fields: 100, fieldSize: 65536, parts: 121,
   },
 };

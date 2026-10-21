@@ -3,6 +3,7 @@ import {
   CreateDateColumn,
   Entity,
   JoinColumn,
+  Index,
   ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
@@ -16,6 +17,13 @@ export class RefreshToken {
   /** Hash của refresh token (không lưu raw token) */
   @Column({ name: 'token_hash', length: 64, unique: true })
   tokenHash: string;
+
+  @Index()
+  @Column({ name: 'session_id', type: 'varchar', length: 36, nullable: true })
+  sessionId: string | null;
+
+  @Column({ name: 'consumed_at', type: 'datetime', precision: 3, nullable: true })
+  consumedAt: Date | null;
 
   @ManyToOne(() => User, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'user_id' })

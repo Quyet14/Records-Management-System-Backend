@@ -18,7 +18,7 @@ function document(departmentId) {
     id: 'document-1', department: departmentId ? { id: departmentId } : null,
     uploader: { id: 'owner', email: 'owner@example.test' },
     status: DocumentStatus.PENDING, visibility: DocumentVisibility.DEPARTMENT,
-    file: { storageKey: 'unused.pdf' }, sha256Checksum: 'checksum',
+    file: { storageKey: __filename }, sha256Checksum: 'checksum',
   };
 }
 
@@ -28,6 +28,7 @@ function service(doc) {
     docsRepo: { save: async value => value, findOne: async () => null },
     userRepo: { findOne: async () => null },
     appendDayLog() {}, log: async () => {}, eventEmitter: { emit() {} },
+    assertStoredFilePresent: async () => {},
   });
 }
 

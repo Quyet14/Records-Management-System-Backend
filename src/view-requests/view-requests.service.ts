@@ -11,6 +11,7 @@ import { Repository } from 'typeorm';
 import { Document, DocumentStatus } from '../entities/document.entity';
 import { canReviewDocument, canViewDepartmentDocument } from '../common/document-permissions';
 import { applyDocumentSecurityScope, assertDocumentSecurityAccess } from '../common/document-security';
+import { assertDocumentContentAvailable } from '../common/document-lifecycle';
 import { User, UserRole, UserPermission } from '../entities/user.entity';
 import {
   ViewRequest,
@@ -53,6 +54,7 @@ export class ViewRequestsService {
     });
     if (!doc) throw new NotFoundException('Khong tim thay tai lieu');
     assertDocumentSecurityAccess(doc, user);
+    assertDocumentContentAvailable(doc);
 
     if ((doc.uploader as any)?.id === user.id) {
       throw new BadRequestException('Ban la nguoi tai len tai lieu nay nen co the xem truc tiep');
@@ -108,6 +110,7 @@ export class ViewRequestsService {
     });
     if (!original) throw new NotFoundException('Khong tim thay yeu cau xem goc');
     assertDocumentSecurityAccess(original.document, user);
+    assertDocumentContentAvailable(original.document);
 
     if (original.requester.id !== user.id) {
       throw new ForbiddenException('Ban chi co the gia han yeu cau xem cua chinh minh');
@@ -204,6 +207,7 @@ export class ViewRequestsService {
     });
     if (!doc) throw new NotFoundException('Khong tim thay tai lieu');
     assertDocumentSecurityAccess(doc, user);
+    assertDocumentContentAvailable(doc);
 
     if ((doc.uploader as any)?.id === user.id) {
       return {
@@ -280,6 +284,7 @@ export class ViewRequestsService {
 
   async approve(id: string, dto: ApproveViewRequestDto, user: AuthUser) {
     const request = await this.getForDecision(id, user);
+    assertDocumentContentAvailable(request.document);
     assertDocumentSecurityAccess(request.document, {
       id: request.requester.id,
       role: request.requester.role,

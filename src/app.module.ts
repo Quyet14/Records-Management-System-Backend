@@ -17,6 +17,8 @@ import { DocumentTypesModule } from './document-types/document-types.module';
 import { RetentionModule } from './retention/retention.module';
 import { StorageModule } from './storage/storage.module';
 import { ViewRequestsModule } from './view-requests/view-requests.module';
+import { DestructionModule } from './destruction/destruction.module';
+import { SecurityModule } from './security/security.module';
 
 @Module({
   imports: [
@@ -28,6 +30,7 @@ import { ViewRequestsModule } from './view-requests/view-requests.module';
     }),
     EventEmitterModule.forRoot(),
     ScheduleModule.forRoot(),
+    SecurityModule,
     AuthModule,
     UsersModule,
     DepartmentsModule,
@@ -41,6 +44,7 @@ import { ViewRequestsModule } from './view-requests/view-requests.module';
     RetentionModule,
     StorageModule,
     ViewRequestsModule,
+    DestructionModule,
   ],
 })
 export class AppModule {}

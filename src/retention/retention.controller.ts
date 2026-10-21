@@ -13,11 +13,16 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { UserRole } from '../entities/user.entity';
 import { RetentionService } from './retention.service';
 import { ReviewStatus } from '../entities/document.entity';
-import { IsEnum } from 'class-validator';
+import { IsBoolean, IsEnum } from 'class-validator';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 
 class UpdateReviewStatusDto {
   @IsEnum(ReviewStatus)
   reviewStatus: ReviewStatus;
+}
+class LegalHoldDto {
+  @IsBoolean()
+  legalHold: boolean;
 }
 
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -25,6 +30,11 @@ class UpdateReviewStatusDto {
 @Controller('retention')
 export class RetentionController {
   constructor(private service: RetentionService) {}
+
+  @Patch('documents/:id/legal-hold')
+  legalHold(@Param('id') id: string, @Body() body: LegalHoldDto, @CurrentUser() actor: { id: string }) {
+    return this.service.setLegalHold(id, body.legalHold, actor.id);
+  }
 
   /**
    * GET /retention/expiring?days=180

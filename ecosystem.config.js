@@ -15,6 +15,13 @@ module.exports = {
         NODE_ENV: 'production',
         PORT: 3002,
         MAX_FILE_SIZE_MB: 51200,
+        AUTH_COOKIE_SECURE: 'true',
+      },
+      env_development: {
+        NODE_ENV: 'development',
+        PORT: 3002,
+        AUTH_COOKIE_SECURE: 'false',
+        AUTH_COOKIE_SAME_SITE: 'lax',
       },
       error_file: './logs/err.log',
       out_file: './logs/out.log',

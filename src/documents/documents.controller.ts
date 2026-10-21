@@ -18,7 +18,7 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { Response } from 'express';
-import { createReadStream } from 'fs';
+import { archiveChecksum, archiveStream, readArchiveBuffer } from '../common/archive-crypto';
 import { DocumentsService } from './documents.service';
 import { ExportService } from '../export/export.service';
 import { WatermarkService } from '../common/watermark/watermark.service';
@@ -43,6 +43,8 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { DocumentAccessGuard } from '../common/guards/document-access.guard';
 import { UserPermission, UserRole } from '../entities/user.entity';
 import { ReviewStatus } from '../entities/document.entity';
+import { ConfigService } from '@nestjs/config';
+import { authAllowedOrigins } from '../auth/auth-origin.guard';
 
 @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard, IpWhitelistGuard)
 @Controller('documents')
@@ -221,6 +223,13 @@ export class DocumentsController {
     return this.service.createDownloadUrl(id, user);
   }
 
+  @Get(':id/view-url')
+  @UseGuards(DocumentAccessGuard)
+  createViewUrl(@CurrentUser() user, @Req() req, @Res({ passthrough: true }) res: Response) {
+    res.setHeader('Cache-Control', 'no-store');
+    return this.service.createViewUrl(req.documentForView, user, req.viewAccessExpiresAt);
+  }
+
   /** GET /documents/:id/download — tải file gốc; thêm watermark=true nếu cần */
   @Get(':id/download')
   async download(
@@ -232,17 +241,26 @@ export class DocumentsController {
     const doc = await this.service.getFileForDownload(id, user);
     const mimeType = doc.file?.mimeType ?? inferMimeType(doc.originalFilename);
     const canWatermark = watermark === 'true' && isPdfFile(doc.originalFilename, mimeType);
+    res.setHeader('Cache-Control', 'no-store, private');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     const fileBuffer = canWatermark
-      ? await this.watermarkService.applyWatermark(doc.storagePath, {
+      ? await this.watermarkService.embedWatermark(await readArchiveBuffer(doc.storagePath, doc.sha256Checksum), {
           userName: user.fullName ?? user.email ?? user.id,
           userEmail: user.email ?? '',
         })
-      : this.watermarkService.readOriginal(doc.storagePath);
+      : null;
     const filename = doc.originalFilename;
     res.setHeader('Content-Type', mimeType);
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
-    res.setHeader('Content-Length', fileBuffer.length);
-    res.send(fileBuffer);
+    if (fileBuffer) { res.setHeader('Content-Length', fileBuffer.length); res.send(fileBuffer); }
+    else {
+      await archiveChecksum(doc.storagePath, doc.sha256Checksum);
+      const stream = archiveStream(doc.storagePath, doc.sha256Checksum);
+      stream.on('error', () => res.destroy());
+      res.on('close', () => stream.destroy());
+      stream.pipe(res);
+    }
   }
 
   /** GET /documents/:id/view — xem file gốc; thêm watermark=true nếu cần */
@@ -255,12 +273,25 @@ export class DocumentsController {
     @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
     const file = await this.service.getFileForView(req.documentForView, user);
+    const frameOrigins = authAllowedOrigins(new ConfigService());
+    res.removeHeader('X-Frame-Options');
+    res.setHeader('Content-Security-Policy', `default-src 'none'; frame-ancestors 'self' ${frameOrigins.join(' ')}; base-uri 'none'; form-action 'none'`);
+    res.setHeader('Cache-Control', 'no-store, private');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Content-Type', file.mimeType);
     res.setHeader(
       'Content-Disposition',
       `${isPdfFile(file.filename, file.mimeType) ? 'inline' : 'attachment'}; filename="${encodeURIComponent(file.filename)}"`,
     );
-    return new StreamableFile(createReadStream(file.path));
+    if (isPdfFile(file.filename, file.mimeType)) {
+      const bytes = await readArchiveBuffer(file.path, file.checksum);
+      return new StreamableFile(await this.watermarkService.embedWatermark(bytes, {
+        userName: user.fullName ?? user.email ?? user.id, userEmail: user.email ?? '',
+      }));
+    }
+    await archiveChecksum(file.path, file.checksum);
+    return new StreamableFile(archiveStream(file.path, file.checksum));
   }
 
   // ─── COMMENTS ──────────────────────────────────────────────

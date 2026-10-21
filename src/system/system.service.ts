@@ -1,14 +1,21 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, LessThan, Repository } from 'typeorm';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { Document, DocumentStatus } from '../entities/document.entity';
 import { RefreshToken } from '../entities/refresh-token.entity';
 import { OtpCode } from '../entities/otp-code.entity';
+import { AuthSession } from '../entities/auth-session.entity';
+import { AuthCaptcha } from '../entities/auth-captcha.entity';
 import { AuditLog } from '../entities/audit-log.entity';
+import { DestructionInfrastructure } from '../destruction/destruction.infrastructure';
+import { beginBarrier, endBarrier, Barrier } from '../destruction/backup-barrier';
+import { archiveChecksum } from '../common/archive-crypto';
+import { PersonalFile } from '../entities/personal-file.entity';
+import { DocumentVersion } from '../entities/document-version.entity';
 
 export interface ChecksumResult {
   documentId: string;
@@ -40,6 +47,7 @@ export class SystemService {
     @InjectRepository(OtpCode)      private otpRepo: Repository<OtpCode>,
     @InjectRepository(AuditLog)     private auditRepo: Repository<AuditLog>,
     private dataSource: DataSource,
+    private destructionInfrastructure: DestructionInfrastructure,
   ) {
     if (!fs.existsSync(this.backupDir)) {
       fs.mkdirSync(this.backupDir, { recursive: true });
@@ -75,28 +83,30 @@ export class SystemService {
   // ─── Kiểm tra checksum toàn bộ kho ───────────────────────
   async verifyChecksums(): Promise<{ results: ChecksumResult[]; errors: number }> {
     const docs = await this.docRepo.find({
-      where: { status: DocumentStatus.STORED },
-      select: ['id', 'originalFilename', 'storagePath', 'sha256Checksum'],
+      where: [{ status: DocumentStatus.STORED }, { status: DocumentStatus.APPROVED }, { status: DocumentStatus.PENDING }],
+      relations: ['file'],
     });
 
     const results: ChecksumResult[] = [];
 
     for (const doc of docs) {
-      if (!doc.sha256Checksum) continue; // bỏ qua nếu chưa có checksum
+      if (doc.destructionStartedAt) continue;
 
       const result: ChecksumResult = {
         documentId: doc.id,
         filename: doc.originalFilename,
-        expected: doc.sha256Checksum,
+        expected: doc.sha256Checksum || '',
         actual: null,
         ok: false,
       };
 
       try {
-        if (!fs.existsSync(doc.storagePath)) {
+        const filename = doc.file?.storageKey || doc.storagePath;
+        if (!doc.sha256Checksum) result.error = 'Thiếu checksum tin cậy';
+        else if (!fs.existsSync(filename)) {
           result.error = 'File không tồn tại trên disk';
         } else {
-          result.actual = await this.computeChecksum(doc.storagePath);
+          result.actual = await archiveChecksum(filename, doc.sha256Checksum);
           result.ok = result.actual === doc.sha256Checksum;
           if (!result.ok) result.error = 'Checksum không khớp';
         }
@@ -107,10 +117,25 @@ export class SystemService {
       results.push(result);
     }
 
+    const personal = await this.dataSource.getRepository(PersonalFile).find();
+    const versions = await this.dataSource.getRepository(DocumentVersion).find({ relations: ['document'] });
+    for (const record of [...personal.map(f => ({ id: f.id, name: f.originalFilename, filename: f.storagePath, hash: f.sha256Checksum })),
+      ...versions.filter(v => v.document?.status !== DocumentStatus.DESTROYED && !v.document?.destructionStartedAt)
+        .map(v => ({ id: v.document?.id || v.id, name: `version-${v.version}`, filename: v.storagePath, hash: v.sha256Checksum }))]) {
+      const result: ChecksumResult = { documentId: record.id, filename: record.name, expected: record.hash || '', actual: null, ok: false };
+      try {
+        if (!record.hash) result.error = 'Thiếu checksum tin cậy';
+        else { result.actual = await archiveChecksum(record.filename, record.hash); result.ok = result.actual === record.hash; }
+      } catch { result.error = 'Không đọc được file hoặc xác thực mã hóa/checksum thất bại'; }
+      results.push(result);
+    }
+
     const errors = results.filter(r => !r.ok).length;
     if (errors > 0) {
       this.logger.warn(`Kiểm tra checksum: ${errors}/${results.length} file có vấn đề`);
     }
+    await this.auditRepo.save(this.auditRepo.create({ action: 'integrity_check', metadata: { checked: results.length, errors,
+      result: errors ? 'failure' : 'success', failedIds: results.filter(r => !r.ok).map(r => r.documentId).slice(0, 100) } }));
 
     return { results, errors };
   }
@@ -119,11 +144,14 @@ export class SystemService {
   async runBackup(): Promise<BackupResult> {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const destDir = path.join(this.backupDir, `backup_${timestamp}`);
+    let barrier: Barrier | undefined;
+    let success = false;
 
     try {
+      barrier = await beginBarrier(this.dataSource.manager, this.destructionInfrastructure, this.archiveDir);
       fs.mkdirSync(destDir, { recursive: true });
 
-      const files = this.listArchiveFiles();
+      const files = this.listFilesRecursive(barrier.sourceDirectory);
       let totalBytes = 0;
 
       for (const f of files) {
@@ -141,11 +169,18 @@ export class SystemService {
         timestamp,
       };
 
+      await endBarrier(this.destructionInfrastructure, barrier, true);
+      success = true;
       this.logger.log(`Backup thành công: ${files.length} files → ${destDir}`);
       return result;
     } catch (err) {
       this.logger.error(`Backup thất bại: ${(err as Error).message}`);
       return { success: false, error: (err as Error).message, timestamp };
+    } finally {
+      if (barrier && !success) {
+        try { await endBarrier(this.destructionInfrastructure, barrier, false); }
+        catch { this.logger.error('Không thể đóng phiên sao lưu an toàn; cần kiểm tra vận hành.'); }
+      }
     }
   }
 
@@ -273,7 +308,7 @@ export class SystemService {
   }
 
   /** Kiểm tra checksum — mỗi tuần Chủ Nhật lúc 3 giờ sáng */
-  @Cron('0 3 * * 0')
+  @Cron('0 3 * * 0', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduledChecksumVerify() {
     this.logger.log('Cron: kiểm tra checksum toàn bộ kho...');
     const { errors } = await this.verifyChecksums();
@@ -291,11 +326,14 @@ export class SystemService {
       .where('expires_at < :now', { now: new Date() })
       .execute();
     this.logger.log(`Cron: đã xoá ${result.affected ?? 0} refresh token hết hạn`);
+    await this.dataSource.getRepository(AuthSession).delete({ expiresAt: LessThan(new Date()) });
+    await this.dataSource.getRepository(AuthCaptcha).delete({ expiresAt: LessThan(new Date()) });
   }
 
   /** Dọn OTP hết hạn — mỗi ngày lúc 5 giờ sáng */
   @Cron('0 5 * * *')
   async purgeExpiredOtp() {
+    await this.dataSource.query('DELETE FROM security_rate_limits WHERE expires_ms < UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000 AND blocked_ms < UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000');
     const result = await this.otpRepo
       .createQueryBuilder()
       .delete()

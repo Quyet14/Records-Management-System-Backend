@@ -56,6 +56,7 @@ export class ExportService {
       qb.andWhere('doc.createdAt <= :dateTo', { dateTo: end });
     }
 
+    qb.andWhere("doc.status != 'destroyed' AND doc.destructionStartedAt IS NULL");
     applyDocumentSecurityScope(qb, user);
     qb.orderBy('doc.createdAt', 'DESC');
     return qb.getMany();

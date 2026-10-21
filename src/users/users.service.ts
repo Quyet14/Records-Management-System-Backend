@@ -17,6 +17,7 @@ import {
 } from '../entities/user.entity';
 import { AuditLog } from '../entities/audit-log.entity';
 import { RefreshToken } from '../entities/refresh-token.entity';
+import { AuthSession } from '../entities/auth-session.entity';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserRoleDto } from './dto/update-user-role.dto';
 
@@ -43,6 +44,7 @@ export class UsersService {
 
   /** Thu hồi toàn bộ refresh token của user — buộc đăng nhập lại */
   private async revokeAllTokens(userId: string): Promise<void> {
+    await this.rtRepo.manager.update(AuthSession, { userId }, { revokedAt: new Date() });
     await this.rtRepo.update(
       { user: { id: userId }, isRevoked: false },
       { isRevoked: true },

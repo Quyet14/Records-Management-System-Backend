@@ -82,7 +82,7 @@ Commands:
 function run(command, args, options = {}) {
   const printable = [command, ...args].join(' ').replace(/--password=\S+/g, '--password=****');
   console.log(`> ${printable}`);
-  execFileSync(command, args, { stdio: 'inherit', shell: process.platform === 'win32', ...options });
+  execFileSync(command, args, { stdio: 'inherit', shell: false, windowsHide: true, ...options });
 }
 
 async function mysqlPool() {
@@ -102,19 +102,68 @@ function ensureDir(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
-function walkFiles(root) {
+function insideFolder(root, filename) {
+  const relative = path.relative(root, filename);
+  return !relative || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+function importExclusions(config = process.env) {
+  const roots = [
+    config.UPLOAD_STAGING_DIR || './storage/staging',
+    config.UPLOAD_ARCHIVE_DIR || './storage/archive',
+    config.PERSONAL_STORAGE_DIR || './storage/personal',
+    config.BACKUP_DIR || './storage/backup',
+    config.DESTRUCTION_STATE_DIR || './storage/destruction-state',
+    config.DESTRUCTION_BACKUP_STAGING_ROOT || './storage/destruction-backup-staging',
+    ...splitList(config.BACKUP_LOCAL_TARGETS, ';'),
+    process.cwd(),
+  ];
+  if (config.ARCHIVE_KEY_FILE) roots.push(path.dirname(path.resolve(config.ARCHIVE_KEY_FILE)));
+  if (config.DESTRUCTION_LOCAL_CONFIG && fs.existsSync(config.DESTRUCTION_LOCAL_CONFIG)) {
+    let policy;
+    try { policy = JSON.parse(fs.readFileSync(config.DESTRUCTION_LOCAL_CONFIG, 'utf8')); }
+    catch { throw new Error('Cannot read destruction backup policy to exclude its storage roots from import.'); }
+    if (!Array.isArray(policy.targets)) throw new Error('Destruction backup policy must contain a targets array.');
+    for (const target of policy.targets) if (typeof target.root === 'string' && target.root.trim()) roots.push(target.root);
+  }
+  const resolved = [];
+  for (const root of roots) {
+    const absolute = path.resolve(root);
+    resolved.push(absolute);
+    if (fs.existsSync(absolute)) resolved.push(fs.realpathSync(absolute));
+  }
+  return [...new Set(resolved)];
+}
+
+function excludedFromImport(filename, exclusions) {
+  return exclusions.some(root => insideFolder(root, filename));
+}
+
+function walkFiles(root, exclusions = []) {
   const result = [];
   if (!fs.existsSync(root)) return result;
+  if (excludedFromImport(path.resolve(root), exclusions) || fs.lstatSync(root).isSymbolicLink()
+    || excludedFromImport(fs.realpathSync(root), exclusions)) return result;
 
   for (const item of fs.readdirSync(root, { withFileTypes: true })) {
     const full = path.join(root, item.name);
+    if (item.isSymbolicLink() || excludedFromImport(full, exclusions)) continue;
     if (item.isDirectory()) {
-      result.push(...walkFiles(full));
+      result.push(...walkFiles(full, exclusions));
     } else if (item.isFile()) {
       result.push(full);
     }
   }
   return result;
+}
+
+function findImportPdfs(sourceDir, exclusions = importExclusions()) {
+  const source = path.resolve(sourceDir);
+  if (!fs.existsSync(source)) throw new Error(`Source folder does not exist on this server: ${source}. Check FILE_IMPORT_SOURCES.`);
+  if (!fs.statSync(source).isDirectory()) throw new Error(`FILE_IMPORT_SOURCES must point to a folder: ${source}`);
+  if (excludedFromImport(source, exclusions) || excludedFromImport(fs.realpathSync(source), exclusions))
+    throw new Error(`Import source is inside internal storage, backup, secrets or backend folders: ${source}. Choose a separate source folder.`);
+  return walkFiles(source, exclusions).filter(isPdf);
 }
 
 function isPdf(filePath) {
@@ -135,9 +184,23 @@ function buildArchivePath(sourceFile, docId, fileDate) {
   const date = fileDate || new Date();
   const yyyy = String(date.getFullYear());
   const dateStr = formatDate(date);
-  const timeStr = `${String(date.getHours()).padStart(2, '0')}${String(date.getMinutes()).padStart(2, '0')}${String(date.getSeconds()).padStart(2, '0')}`;
   const dir = path.join(ARCHIVE_DIR, yyyy, dateStr);
-  return path.join(dir, `${timeStr}-${docId}${path.extname(sourceFile).toLowerCase() || '.pdf'}`);
+  const { encryptionEnabled } = require('../dist/common/archive-crypto');
+  return path.join(dir, `${docId}${encryptionEnabled() ? '.lths' : path.extname(sourceFile).toLowerCase() || '.pdf'}`);
+}
+
+async function secureImportFile(filename, destination, checksum, stat, originalFilename = path.basename(filename)) {
+  const { inspectUpload } = require('../dist/common/upload-inspection');
+  const { encryptArchiveFile } = require('../dist/common/archive-crypto');
+  try {
+    await inspectUpload({ path: filename, originalname: originalFilename, size: stat.size, mimetype: 'application/pdf' });
+    ensureDir(path.dirname(destination));
+    await encryptArchiveFile(filename, destination, checksum);
+  } catch (error) {
+    const failure = new Error(`File ${JSON.stringify(path.resolve(filename))}: ${error.message}`);
+    failure.cause = error;
+    throw failure;
+  }
 }
 
 function formatDate(date) {
@@ -178,13 +241,21 @@ async function importMysqlDump() {
   ];
 
   console.log(`Restoring ${resolved} into ${MYSQL.database}...`);
-  const sql = fs.readFileSync(resolved);
-  const child = require('child_process').spawnSync('mysql', args, {
-    input: sql,
-    stdio: ['pipe', 'inherit', 'inherit'],
-    shell: process.platform === 'win32',
-  });
-  if (child.status !== 0) throw new Error(`mysql restore failed with exit code ${child.status}`);
+  const barrier = await require('./destruction-backup-barrier.cjs').begin(ARCHIVE_DIR, 'restore', MYSQL);
+  let success = false;
+  try {
+    const sql = fs.readFileSync(resolved);
+    const child = require('child_process').spawnSync(process.env.MYSQL_CLIENT_PATH || 'mysql', args, {
+      input: sql,
+      stdio: ['pipe', 'inherit', 'inherit'],
+      shell: false,
+      windowsHide: true,
+    });
+    if (child.error?.code === 'ENOENT') throw new Error('MySQL client not found. Set MYSQL_CLIENT_PATH to the absolute path of mysql.exe or add its directory to PATH.');
+    if (child.error) throw child.error;
+    if (child.status !== 0) throw new Error(`mysql restore failed with exit code ${child.status}`);
+    success = true;
+  } finally { await barrier.finish(success); }
 }
 
 async function insertDocument(pool, input) {
@@ -252,12 +323,15 @@ async function insertDocument(pool, input) {
 }
 
 async function indexFiles() {
+  const { validateArchiveConfiguration, encryptionEnabled } = require('../dist/common/archive-crypto');
+  validateArchiveConfiguration();
   if (FILE_IMPORT_SOURCES.length === 0) {
     throw new Error('Missing FILE_IMPORT_SOURCES. Use semicolon-separated folders.');
   }
   if (!['copy', 'link'].includes(FILE_IMPORT_MODE)) {
     throw new Error('FILE_IMPORT_MODE must be copy or link');
   }
+  if (FILE_IMPORT_MODE === 'link' && encryptionEnabled()) throw new Error('Encrypted archive requires FILE_IMPORT_MODE=copy; plaintext links are disabled.');
 
   ensureDir(STAGING_DIR);
   ensureDir(ARCHIVE_DIR);
@@ -267,9 +341,13 @@ async function indexFiles() {
   let skipped = 0;
 
   try {
+    const exclusions = importExclusions();
     for (const sourceDir of FILE_IMPORT_SOURCES.map((p) => path.resolve(p))) {
       console.log(`Scanning ${sourceDir}...`);
-      const files = walkFiles(sourceDir).filter(isPdf);
+      const files = findImportPdfs(sourceDir, exclusions);
+      console.log(`Found ${files.length} PDF file(s).`);
+      console.log('Internal storage, destruction state, backup, secrets and backend folders are excluded.');
+      if (files.length === 0) console.warn(`No PDF files found in ${sourceDir} or its subfolders. Check the source path and file extensions.`);
       for (const file of files) {
         const checksum = await sha256(file);
         const stat = fs.statSync(file);
@@ -295,7 +373,7 @@ async function indexFiles() {
         const storagePath = FILE_IMPORT_MODE === 'copy' ? buildArchivePath(file, id, fileDate) : file;
         if (FILE_IMPORT_MODE === 'copy') {
           ensureDir(path.dirname(storagePath));
-          fs.copyFileSync(file, storagePath);
+          await secureImportFile(file, storagePath, checksum, stat);
         }
 
         await insertDocument(pool, {
@@ -320,6 +398,8 @@ async function indexFiles() {
 }
 
 async function migrateSqlServer() {
+  const { validateArchiveConfiguration } = require('../dist/common/archive-crypto');
+  validateArchiveConfiguration();
   let sql;
   try {
     sql = require('mssql');
@@ -356,8 +436,12 @@ async function migrateSqlServer() {
       }
       const checksum = await sha256(storagePath);
       const stat = fs.statSync(storagePath);
+      const id = crypto.randomUUID(), encryptedPath = buildArchivePath(storagePath, id, getImportDate(storagePath, stat));
+      const originalFilename = row.originalFilename || row.original_filename || path.basename(storagePath);
+      await secureImportFile(storagePath, encryptedPath, checksum, stat, originalFilename);
       await insertDocument(pool, {
-        originalFilename: row.originalFilename || row.original_filename || path.basename(storagePath),
+        id,
+        originalFilename,
         title: row.title,
         description: row.description,
         departmentId: row.departmentId || row.department_id,
@@ -365,7 +449,7 @@ async function migrateSqlServer() {
         documentTypeId: row.documentTypeId || row.document_type_id,
         documentDate: row.documentDate || row.document_date,
         status: row.status || FILE_IMPORT_STATUS,
-        storagePath,
+        storagePath: encryptedPath,
         sha256Checksum: checksum,
         fileSizeBytes: row.fileSizeBytes || row.file_size_bytes || stat.size,
       });
@@ -392,30 +476,39 @@ function dumpMysql() {
     MYSQL.database,
     `--result-file=${dumpPath}`,
   ];
-  run('mysqldump', args);
+  try { run(process.env.MYSQL_DUMP_PATH || 'mysqldump', args); }
+  catch (error) {
+    if (error.code === 'ENOENT') throw new Error('mysqldump not found. Set MYSQL_DUMP_PATH to the absolute path of mysqldump.exe or add its directory to PATH.');
+    throw error;
+  }
   return dumpPath;
 }
 
-function backupSync() {
-  const dumpPath = dumpMysql();
-  const remotes = splitList(process.env.BACKUP_TARGETS || process.env.RCLONE_REMOTES, ',');
-  const localTargets = splitList(process.env.BACKUP_LOCAL_TARGETS, ';');
+async function backupSync() {
+  const barrier = await require('./destruction-backup-barrier.cjs').begin(ARCHIVE_DIR, 'backup', MYSQL);
+  let success = false;
+  try {
+    const dumpPath = dumpMysql();
+    const remotes = splitList(process.env.BACKUP_TARGETS || process.env.RCLONE_REMOTES, ',');
+    const localTargets = splitList(process.env.BACKUP_LOCAL_TARGETS, ';');
 
-  for (const target of localTargets) {
-    const targetRoot = path.resolve(target);
-    const filesTarget = path.join(targetRoot, 'files');
-    const dbTarget = path.join(targetRoot, 'db-dumps');
-    ensureDir(filesTarget);
-    ensureDir(dbTarget);
-    copyTree(ARCHIVE_DIR, filesTarget);
-    fs.copyFileSync(dumpPath, path.join(dbTarget, path.basename(dumpPath)));
-    console.log(`Copied backup to ${targetRoot}`);
-  }
+    for (const target of localTargets) {
+      const targetRoot = path.resolve(target);
+      const filesTarget = path.join(targetRoot, 'files');
+      const dbTarget = path.join(targetRoot, 'db-dumps');
+      ensureDir(filesTarget);
+      ensureDir(dbTarget);
+      copyTree(barrier.sourceDirectory, filesTarget);
+      fs.copyFileSync(dumpPath, path.join(dbTarget, path.basename(dumpPath)));
+      console.log(`Copied backup to ${targetRoot}`);
+    }
 
-  for (const remote of remotes) {
-    run('rclone', ['sync', ARCHIVE_DIR, `${remote}/files`, '--create-empty-src-dirs', '--log-level', 'INFO']);
-    run('rclone', ['copy', BACKUP_DIR, `${remote}/db-dumps`, '--log-level', 'INFO']);
-  }
+    for (const remote of remotes) {
+      run('rclone', ['sync', barrier.sourceDirectory, `${remote}/files`, '--create-empty-src-dirs', '--log-level', 'INFO']);
+      run('rclone', ['copy', BACKUP_DIR, `${remote}/db-dumps`, '--log-level', 'INFO']);
+    }
+    success = true;
+  } finally { await barrier.finish(success); }
 }
 
 function copyTree(src, dest) {
@@ -439,10 +532,11 @@ async function main() {
   if (command === 'import-mysql-dump' || command === 'all') await importMysqlDump();
   if (command === 'index-files' || command === 'all') await indexFiles();
   if (command === 'migrate-sqlserver' || command === 'all') await migrateSqlServer();
-  if (command === 'backup-sync' || command === 'all') backupSync();
+  if (command === 'backup-sync' || command === 'all') await backupSync();
 }
 
-main().catch((err) => {
+module.exports = { secureImportFile, buildArchivePath, importExclusions, findImportPdfs };
+if (require.main === module) main().catch((err) => {
   console.error(`Data pipeline failed: ${err.message}`);
   process.exit(1);
 });

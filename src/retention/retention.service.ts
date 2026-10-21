@@ -4,6 +4,9 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { LessThan, Repository, IsNull, Not, LessThanOrEqual } from 'typeorm';
 import { Document, ClassificationValue, ReviewStatus, DocumentStatus } from '../entities/document.entity';
 import { RetentionBasis } from '../entities/document-type.entity';
+import { assertDocumentMutable } from '../common/document-lifecycle';
+import { ConflictException, NotFoundException } from '@nestjs/common';
+import { AuditLog } from '../entities/audit-log.entity';
 
 /** Hạn chót chỉnh lý tài liệu trước 01/7/2025 theo Luật 01/2011/QH13 */
 const REVIEW_DEADLINE = new Date('2030-07-01');
@@ -23,6 +26,19 @@ export class RetentionService {
     private docRepo: Repository<Document>,
   ) {}
 
+  async setLegalHold(id: string, legalHold: boolean, actorId: string) {
+    return this.docRepo.manager.transaction('READ COMMITTED', async m => {
+      const doc = await m.findOne(Document, { where: { id }, lock: { mode: 'pessimistic_write' } });
+      if (!doc) throw new NotFoundException('Không tìm thấy hồ sơ.');
+      if (doc.destructionStartedAt || doc.status === DocumentStatus.DESTROYED)
+        throw new ConflictException({ code: 'DESTRUCTION_STARTED', message: 'Nội dung đã bắt đầu hủy; không thể thay đổi legal hold.' });
+      await m.update(Document, id, { legalHold });
+      await m.save(AuditLog, m.create(AuditLog, { actor: { id: actorId }, document: { id }, action: 'legal_hold',
+        createdAt: new Date(), metadata: { old: doc.legalHold, new: legalHold } }));
+      return { id, legalHold };
+    });
+  }
+
   // ─── Tính hạn lưu trữ cho một tài liệu ────────────────────
 
   /**
@@ -31,19 +47,24 @@ export class RetentionService {
    * Trả về null nếu không tính được (chưa có documentType hoặc vĩnh viễn).
    */
   async computeAndSaveExpiry(doc: Document): Promise<Date | null> {
-    if (!doc.documentType) return null;
+    assertDocumentMutable(doc);
+    // Destruction eligibility never inherits an upload-date fallback from legacy expires_at.
+    doc.retentionUntil = null;
+    if (!doc.documentType) { await this.docRepo.save(doc); return null; }
 
     const dt = doc.documentType;
     if (dt.isPermanent) {
+      doc.retentionUntil = null;
+      doc.expiresAt = null as any;
       // Vĩnh viễn — không set expiresAt, đảm bảo classificationValue = PERMANENT
       if (doc.classificationValue !== ClassificationValue.PERMANENT) {
         doc.classificationValue = ClassificationValue.PERMANENT;
-        await this.docRepo.save(doc);
       }
+      await this.docRepo.save(doc);
       return null;
     }
 
-    if (!dt.retentionYears) return null;
+    if (!dt.retentionYears || dt.retentionBasis === RetentionBasis.PERMANENT) { await this.docRepo.save(doc); return null; }
 
     let baseDate: Date | null = null;
 
@@ -58,12 +79,19 @@ export class RetentionService {
         break;
     }
 
-    if (!baseDate) return null;
+    if (!baseDate) { await this.docRepo.save(doc); return null; }
 
     const expires = new Date(baseDate);
     expires.setFullYear(expires.getFullYear() + dt.retentionYears);
 
     doc.expiresAt = expires;
+    const approvedBasis = dt.retentionBasis === RetentionBasis.PATIENT_DEATH_DATE ? doc.patientDeathDate : doc.documentDate;
+    if (approvedBasis && doc.approvedAt && dt.retentionYears > 0) {
+      const retention = new Date(approvedBasis);
+      retention.setUTCFullYear(retention.getUTCFullYear() + dt.retentionYears);
+      retention.setUTCHours(23, 59, 59, 999);
+      doc.retentionUntil = retention;
+    }
     if (doc.classificationValue === ClassificationValue.UNCLASSIFIED) {
       doc.classificationValue = ClassificationValue.TIMED;
     }

@@ -87,13 +87,13 @@ function dumpDatabase() {
   return dumpFile;
 }
 
-function syncToRemotes() {
+function syncToRemotes(archiveSource = ARCHIVE_DIR) {
   for (const remote of RCLONE_REMOTES) {
     console.log(`\n☁️  Đang đồng bộ tới: ${remote}`);
 
     // sync = làm remote giống hệt local (xoá ở remote nếu đã xoá ở local)
     // dùng sync cho file kho lưu trữ vì đây là nguồn "sự thật" duy nhất
-    run(`rclone sync "${ARCHIVE_DIR}" "${remote}/files" --create-empty-src-dirs --log-level INFO`);
+    run(`rclone sync "${archiveSource}" "${remote}/files" --create-empty-src-dirs --log-level INFO`);
 
     // dùng copy cho các bản dump DB vì ta muốn GIỮ LẠI lịch sử dump cũ ở remote
     // dù local đã dọn dẹp (retention) — copy không xoá gì ở đích
@@ -117,9 +117,14 @@ function cleanupOldDumps() {
 async function main() {
   console.log(`\n=== BẮT ĐẦU BACKUP: ${TIMESTAMP} ===`);
   assertConfig();
-  dumpDatabase();
-  if (RCLONE_REMOTES.length > 0) syncToRemotes();
-  cleanupOldDumps();
+  const barrier = await require('./scripts/destruction-backup-barrier.cjs').begin(ARCHIVE_DIR);
+  let success = false;
+  try {
+    dumpDatabase();
+    if (RCLONE_REMOTES.length > 0) syncToRemotes(barrier.sourceDirectory);
+    cleanupOldDumps();
+    success = true;
+  } finally { await barrier.finish(success); }
   console.log(`\n✅ Backup hoàn tất: ${TIMESTAMP}`);
 }
 

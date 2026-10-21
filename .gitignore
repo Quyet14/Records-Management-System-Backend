@@ -9,3 +9,7 @@ storage/
 
 *.log
 *.tsbuildinfo
+deploy/destruction.local.json
+.npm-cache/
+*.lths
+*archive-keys*.json

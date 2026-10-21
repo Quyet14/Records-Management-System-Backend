@@ -6,11 +6,12 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Brackets, Repository } from 'typeorm';
+import { Repository } from 'typeorm';
 import { Document, DocumentStatus } from '../../entities/document.entity';
 import { UserRole } from '../../entities/user.entity';
 import { canReviewDocument, canViewDepartmentDocument } from '../document-permissions';
 import { assertDocumentSecurityAccess } from '../document-security';
+import { assertDocumentContentAvailable } from '../document-lifecycle';
 import {
   ViewRequest,
   ViewRequestStatus,
@@ -38,6 +39,7 @@ export class DocumentAccessGuard implements CanActivate {
       relations: ['department', 'uploader', 'file'],
     });
     if (!doc) throw new NotFoundException('Khong tim thay tai lieu');
+    assertDocumentContentAvailable(doc);
     assertDocumentSecurityAccess(doc, user);
 
     const isOwner = doc.uploader?.id === user.id;
@@ -84,19 +86,8 @@ export class DocumentAccessGuard implements CanActivate {
       .andWhere('vr.status = :approvedStatus', {
         approvedStatus: ViewRequestStatus.APPROVED,
       })
-      .andWhere(
-        new Brackets((qb) => {
-          qb.where('vr.access_expires_at > :now', { now: new Date() }).orWhere(
-            `EXISTS (
-              SELECT 1
-              FROM view_requests pending
-              WHERE pending.extended_from_request_id = vr.id
-                AND pending.status = :pendingStatus
-            )`,
-            { pendingStatus: ViewRequestStatus.PENDING },
-          );
-        }),
-      )
+      .andWhere('vr.access_expires_at > :now', { now: new Date() })
+      .orderBy('vr.access_expires_at', 'DESC')
       .getOne();
 
     if (!approvedRequest) {
@@ -104,6 +95,7 @@ export class DocumentAccessGuard implements CanActivate {
     }
 
     req.documentForView = doc;
+    req.viewAccessExpiresAt = approvedRequest.accessExpiresAt;
     return true;
   }
 }

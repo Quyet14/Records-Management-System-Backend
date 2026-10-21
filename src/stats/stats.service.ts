@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Not, Repository } from 'typeorm';
 import {
   Document,
   DocumentStatus,
@@ -23,7 +23,7 @@ export class StatsService {
   // ─── Tổng quan hệ thống ────────────────────────────────────
   async getOverview() {
     const [totalDocs, totalUsers, totalDepts] = await Promise.all([
-      this.docRepo.count(),
+      this.docRepo.count({ where: { status: Not(DocumentStatus.DESTROYED) } }),
       this.userRepo.count(),
       this.deptRepo.count(),
     ]);
@@ -33,7 +33,7 @@ export class StatsService {
       .createQueryBuilder('doc')
       .select('doc.status', 'status')
       .addSelect('COUNT(*)', 'count')
-      .addSelect('COALESCE(SUM(doc.fileSizeBytes), 0)', 'totalBytes')
+      .addSelect("COALESCE(SUM(CASE WHEN doc.status != 'destroyed' THEN doc.fileSizeBytes ELSE 0 END), 0)", 'totalBytes')
       .groupBy('doc.status')
       .getRawMany();
 
@@ -64,8 +64,8 @@ export class StatsService {
       .leftJoin('doc.department', 'dept')
       .select('dept.id', 'departmentId')
       .addSelect('dept.name', 'departmentName')
-      .addSelect('COUNT(doc.id)', 'totalDocuments')
-      .addSelect('COALESCE(SUM(doc.fileSizeBytes), 0)', 'totalBytes')
+      .addSelect("COUNT(CASE WHEN doc.status != 'destroyed' THEN doc.id END)", 'totalDocuments')
+      .addSelect("COALESCE(SUM(CASE WHEN doc.status != 'destroyed' THEN doc.fileSizeBytes ELSE 0 END), 0)", 'totalBytes')
       .addSelect(
         `SUM(CASE WHEN doc.status = 'stored' THEN 1 ELSE 0 END)`,
         'storedCount',
@@ -102,8 +102,8 @@ export class StatsService {
     const monthly = await this.docRepo
       .createQueryBuilder('doc')
       .select('MONTH(doc.createdAt)', 'month')
-      .addSelect('COUNT(doc.id)', 'totalDocuments')
-      .addSelect('COALESCE(SUM(doc.fileSizeBytes), 0)', 'totalBytes')
+      .addSelect("COUNT(CASE WHEN doc.status != 'destroyed' THEN doc.id END)", 'totalDocuments')
+      .addSelect("COALESCE(SUM(CASE WHEN doc.status != 'destroyed' THEN doc.fileSizeBytes ELSE 0 END), 0)", 'totalBytes')
       .where('YEAR(doc.createdAt) = :year', { year: targetYear })
       .groupBy('MONTH(doc.createdAt)')
       .orderBy('month', 'ASC')
@@ -166,8 +166,8 @@ export class StatsService {
       .select('user.id', 'userId')
       .addSelect('user.fullName', 'fullName')
       .addSelect('user.email', 'email')
-      .addSelect('COUNT(doc.id)', 'totalDocuments')
-      .addSelect('COALESCE(SUM(doc.fileSizeBytes), 0)', 'totalBytes')
+      .addSelect("COUNT(CASE WHEN doc.status != 'destroyed' THEN doc.id END)", 'totalDocuments')
+      .addSelect("COALESCE(SUM(CASE WHEN doc.status != 'destroyed' THEN doc.fileSizeBytes ELSE 0 END), 0)", 'totalBytes')
       .groupBy('user.id')
       .addGroupBy('user.fullName')
       .addGroupBy('user.email')
@@ -194,8 +194,8 @@ export class StatsService {
       .addSelect('dt.name', 'typeName')
       .addSelect('dt.retentionYears', 'retentionYears')
       .addSelect('dt.isPermanent', 'isPermanent')
-      .addSelect('COUNT(doc.id)', 'totalDocuments')
-      .addSelect('COALESCE(SUM(doc.fileSizeBytes), 0)', 'totalBytes')
+      .addSelect("COUNT(CASE WHEN doc.status != 'destroyed' THEN doc.id END)", 'totalDocuments')
+      .addSelect("COALESCE(SUM(CASE WHEN doc.status != 'destroyed' THEN doc.fileSizeBytes ELSE 0 END), 0)", 'totalBytes')
       .addSelect(
         `SUM(CASE WHEN doc.status = 'stored' THEN 1 ELSE 0 END)`,
         'storedCount',
@@ -210,7 +210,7 @@ export class StatsService {
 
     // Đếm riêng tài liệu chưa gán loại hồ sơ
     const unclassifiedCount = await this.docRepo.count({
-      where: { documentType: null } as any,
+      where: { documentType: null, status: Not(DocumentStatus.DESTROYED) } as any,
     });
 
     return {
@@ -234,7 +234,7 @@ export class StatsService {
       .createQueryBuilder('doc')
       .select('doc.classificationValue', 'classificationValue')
       .addSelect('COUNT(doc.id)', 'count')
-      .addSelect('COALESCE(SUM(doc.fileSizeBytes), 0)', 'totalBytes')
+      .addSelect("COALESCE(SUM(CASE WHEN doc.status != 'destroyed' THEN doc.fileSizeBytes ELSE 0 END), 0)", 'totalBytes')
       .groupBy('doc.classificationValue')
       .getRawMany();
 
