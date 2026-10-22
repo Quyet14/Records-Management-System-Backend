@@ -359,7 +359,17 @@ export class DestructionService {
       r.status = approvals.length + 1 >= r.requiredApprovals ? 'scheduled' : 'partially_approved';
       r.executeAfter = r.status === 'scheduled' ? new Date(now.getTime() + WAIT_MS) : null;
       await m.save(Request, r);
-      if (r.executeAfter) await m.insert(Job, { requestId: id, runAt: r.executeAfter, status: 'scheduled', attempts: 0 });
+      if (r.executeAfter) {
+        const job = await m.findOne(Job, { where: { requestId: id }, lock: { mode: 'pessimistic_write' } });
+        if (job) {
+          // An operator may reopen a failed, unprepared request for genuine OTP approval.
+          // Preserve attempt history; never reuse a job with deletion progress or a live lease.
+          if (job.status !== 'cancelled' || job.checkpoint || job.leaseOwner || job.leaseExpiry)
+            fail(409, 'DESTRUCTION_JOB_CONFLICT', 'Công việc hủy cũ chưa đủ điều kiện lập lịch lại.');
+          job.status = 'scheduled'; job.runAt = r.executeAfter; job.lastError = null;
+          await m.save(Job, job);
+        } else await m.insert(Job, { requestId: id, runAt: r.executeAfter, status: 'scheduled', attempts: 0 });
+      }
       await this.audit(m, current.id, r, 'Đã duyệt đề nghị bằng OTP', old);
       return { id, status: r.status, version: r.version, executeAfter: r.executeAfter };
     });

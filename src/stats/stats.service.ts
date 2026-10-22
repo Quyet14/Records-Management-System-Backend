@@ -1,6 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Not, Repository } from 'typeorm';
+import { IsNull, Not, Repository } from 'typeorm';
 import {
   Document,
   DocumentStatus,
@@ -21,16 +21,21 @@ export class StatsService {
   ) {}
 
   // ─── Tổng quan hệ thống ────────────────────────────────────
-  async getOverview() {
+  private documents(departmentId?: string) {
+    const qb = this.docRepo.createQueryBuilder('doc');
+    if (departmentId) qb.andWhere('doc.department_id = :reportDepartmentId', { reportDepartmentId: departmentId });
+    return qb;
+  }
+
+  async getOverview(departmentId?: string) {
     const [totalDocs, totalUsers, totalDepts] = await Promise.all([
-      this.docRepo.count({ where: { status: Not(DocumentStatus.DESTROYED) } }),
-      this.userRepo.count(),
-      this.deptRepo.count(),
+      this.docRepo.count({ where: { status: Not(DocumentStatus.DESTROYED), ...(departmentId ? { department: { id: departmentId } } : {}) } }),
+      this.userRepo.count(departmentId ? { where: { department: { id: departmentId } } } : {}),
+      this.deptRepo.count(departmentId ? { where: { id: departmentId } } : {}),
     ]);
 
     // Đếm theo từng trạng thái
-    const byStatus = await this.docRepo
-      .createQueryBuilder('doc')
+    const byStatus = await this.documents(departmentId)
       .select('doc.status', 'status')
       .addSelect('COUNT(*)', 'count')
       .addSelect("COALESCE(SUM(CASE WHEN doc.status != 'destroyed' THEN doc.fileSizeBytes ELSE 0 END), 0)", 'totalBytes')
@@ -38,10 +43,9 @@ export class StatsService {
       .getRawMany();
 
     // Tổng dung lượng đã lưu trữ
-    const storedSize = await this.docRepo
-      .createQueryBuilder('doc')
+    const storedSize = await this.documents(departmentId)
       .select('COALESCE(SUM(doc.fileSizeBytes), 0)', 'bytes')
-      .where('doc.status = :status', { status: DocumentStatus.STORED })
+      .andWhere('doc.status = :status', { status: DocumentStatus.STORED })
       .getRawOne();
 
     return {
@@ -58,9 +62,8 @@ export class StatsService {
   }
 
   // ─── Thống kê theo khoa ────────────────────────────────────
-  async getByDepartment() {
-    const rows = await this.docRepo
-      .createQueryBuilder('doc')
+  async getByDepartment(departmentId?: string) {
+    const rows = await this.documents(departmentId)
       .leftJoin('doc.department', 'dept')
       .select('dept.id', 'departmentId')
       .addSelect('dept.name', 'departmentName')
@@ -95,16 +98,16 @@ export class StatsService {
   }
 
   // ─── Thống kê theo năm ────────────────────────────────────
-  async getByYear(year?: number) {
+  async getByYear(year?: number, departmentId?: string) {
+    if (year !== undefined && (!Number.isInteger(year) || year < 1900 || year > 9999)) throw new BadRequestException("Invalid year.");
     const targetYear = year || new Date().getFullYear();
 
     // Theo tháng trong năm
-    const monthly = await this.docRepo
-      .createQueryBuilder('doc')
+    const monthly = await this.documents(departmentId)
       .select('MONTH(doc.createdAt)', 'month')
       .addSelect("COUNT(CASE WHEN doc.status != 'destroyed' THEN doc.id END)", 'totalDocuments')
       .addSelect("COALESCE(SUM(CASE WHEN doc.status != 'destroyed' THEN doc.fileSizeBytes ELSE 0 END), 0)", 'totalBytes')
-      .where('YEAR(doc.createdAt) = :year', { year: targetYear })
+      .andWhere('YEAR(doc.createdAt) = :year', { year: targetYear })
       .groupBy('MONTH(doc.createdAt)')
       .orderBy('month', 'ASC')
       .getRawMany();
@@ -127,14 +130,13 @@ export class StatsService {
   }
 
   // ─── Tăng trưởng dung lượng (theo tháng, toàn bộ lịch sử) ──
-  async getStorageGrowth() {
-    const rows = await this.docRepo
-      .createQueryBuilder('doc')
+  async getStorageGrowth(departmentId?: string) {
+    const rows = await this.documents(departmentId)
       .select('YEAR(doc.createdAt)', 'year')
       .addSelect('MONTH(doc.createdAt)', 'month')
       .addSelect('COALESCE(SUM(doc.fileSizeBytes), 0)', 'addedBytes')
       .addSelect('COUNT(doc.id)', 'addedDocs')
-      .where('doc.status = :status', { status: DocumentStatus.STORED })
+      .andWhere('doc.status = :status', { status: DocumentStatus.STORED })
       .groupBy('YEAR(doc.createdAt)')
       .addGroupBy('MONTH(doc.createdAt)')
       .orderBy('year', 'ASC')
@@ -159,9 +161,9 @@ export class StatsService {
   }
 
   // ─── Top người dùng upload nhiều nhất ─────────────────────
-  async getTopUploaders(limit = 10) {
-    const rows = await this.docRepo
-      .createQueryBuilder('doc')
+  async getTopUploaders(limit = 10, departmentId?: string) {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new BadRequestException("Invalid limit.");
+    const rows = await this.documents(departmentId)
       .leftJoin('doc.uploader', 'user')
       .select('user.id', 'userId')
       .addSelect('user.fullName', 'fullName')
@@ -185,9 +187,8 @@ export class StatsService {
   }
 
   // ─── Thống kê theo loại hồ sơ ─────────────────────────────
-  async getByDocumentType() {
-    const rows = await this.docRepo
-      .createQueryBuilder('doc')
+  async getByDocumentType(departmentId?: string) {
+    const rows = await this.documents(departmentId)
       .leftJoin('doc.documentType', 'dt')
       .select('dt.id', 'typeId')
       .addSelect('dt.code', 'code')
@@ -210,7 +211,7 @@ export class StatsService {
 
     // Đếm riêng tài liệu chưa gán loại hồ sơ
     const unclassifiedCount = await this.docRepo.count({
-      where: { documentType: null, status: Not(DocumentStatus.DESTROYED) } as any,
+      where: { documentType: IsNull(), status: Not(DocumentStatus.DESTROYED), ...(departmentId ? { department: { id: departmentId } } : {}) },
     });
 
     return {
@@ -229,9 +230,8 @@ export class StatsService {
   }
 
   // ─── Thống kê phân loại giá trị ───────────────────────────
-  async getByClassificationValue() {
-    const rows = await this.docRepo
-      .createQueryBuilder('doc')
+  async getByClassificationValue(departmentId?: string) {
+    const rows = await this.documents(departmentId)
       .select('doc.classificationValue', 'classificationValue')
       .addSelect('COUNT(doc.id)', 'count')
       .addSelect("COALESCE(SUM(CASE WHEN doc.status != 'destroyed' THEN doc.fileSizeBytes ELSE 0 END), 0)", 'totalBytes')
@@ -246,17 +246,16 @@ export class StatsService {
   }
 
   // ─── Thống kê chỉnh lý tài liệu cũ ───────────────────────
-  async getReviewProgress() {
+  async getReviewProgress(departmentId?: string) {
     const OLD_DOC_CUTOFF = new Date('2025-07-01');
     const REVIEW_DEADLINE = new Date('2030-07-01');
     const now = new Date();
 
-    const rows = await this.docRepo
-      .createQueryBuilder('doc')
+    const rows = await this.documents(departmentId)
       .select('doc.reviewStatus', 'reviewStatus')
       .addSelect('COUNT(doc.id)', 'count')
-      .where(
-        'doc.document_date < :cutoff OR (doc.document_date IS NULL AND doc.created_at < :cutoff)',
+      .andWhere(
+        '(doc.document_date < :cutoff OR (doc.document_date IS NULL AND doc.created_at < :cutoff))',
         { cutoff: OLD_DOC_CUTOFF },
       )
       .groupBy('doc.reviewStatus')
@@ -284,16 +283,16 @@ export class StatsService {
   }
 
   // ─── Tài liệu sắp hết hạn lưu trữ ────────────────────────
-  async getExpiringSoon(days = 180) {
+  async getExpiringSoon(days = 180, departmentId?: string) {
+    if (!Number.isInteger(days) || days < 1 || days > 36500) throw new BadRequestException("Invalid days.");
     const now = new Date();
     const threshold = new Date();
     threshold.setDate(threshold.getDate() + days);
 
-    const [data, total] = await this.docRepo
-      .createQueryBuilder('doc')
+    const [data, total] = await this.documents(departmentId)
       .leftJoinAndSelect('doc.department', 'department')
       .leftJoinAndSelect('doc.documentType', 'documentType')
-      .where('doc.expires_at IS NOT NULL')
+      .andWhere('doc.expires_at IS NOT NULL')
       .andWhere('doc.expires_at > :now', { now })
       .andWhere('doc.expires_at <= :threshold', { threshold })
       .andWhere('doc.status = :status', { status: DocumentStatus.STORED })
@@ -310,7 +309,7 @@ export class StatsService {
         documentType: (d.documentType as any)?.name ?? '—',
         expiresAt: d.expiresAt,
         daysRemaining: Math.ceil(
-          (d.expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60 * 24),
+          (new Date(d.expiresAt).getTime() - now.getTime()) / (1000 * 60 * 60 * 24),
         ),
       })),
     };

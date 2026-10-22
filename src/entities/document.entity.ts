@@ -108,7 +108,7 @@ export class Document {
   @Column({ name: 'author_name', length: 255, nullable: true })
   authorName: string;
 
-  @Column({ type: 'text', nullable: true })
+  @Column({ type: 'mediumtext', nullable: true })
   description: string;
 
   @ManyToOne(() => Department, { nullable: true })

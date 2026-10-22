@@ -15,6 +15,7 @@ import { RetentionService } from './retention.service';
 import { ReviewStatus } from '../entities/document.entity';
 import { IsBoolean, IsEnum } from 'class-validator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { ReportActor, reportDepartment } from '../common/report-scope';
 
 class UpdateReviewStatusDto {
   @IsEnum(ReviewStatus)
@@ -41,8 +42,9 @@ export class RetentionController {
    * Danh sách tài liệu sắp hết hạn lưu trữ
    */
   @Get('expiring')
-  getExpiring(@Query('days') days?: string) {
-    return this.service.getExpiringDocuments(days ? parseInt(days, 10) : undefined);
+  @Roles(UserRole.ADMIN, UserRole.DEPARTMENT_HEAD)
+  getExpiring(@CurrentUser() actor: ReportActor, @Query('days') days?: string) {
+    return this.service.getExpiringDocuments(days ? Number(days) : undefined, reportDepartment(actor));
   }
 
   /**
@@ -50,13 +52,16 @@ export class RetentionController {
    * Danh sách tài liệu trước 01/7/2025 chưa hoàn thành chỉnh lý
    */
   @Get('pending-review')
+  @Roles(UserRole.ADMIN, UserRole.DEPARTMENT_HEAD)
   getPendingReview(
+    @CurrentUser() actor: ReportActor,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
     return this.service.getPendingReviewDocuments(
-      page ? parseInt(page, 10) : 1,
-      limit ? parseInt(limit, 10) : 20,
+      page ? Number(page) : 1,
+      limit ? Number(limit) : 20,
+      reportDepartment(actor),
     );
   }
 
@@ -65,8 +70,9 @@ export class RetentionController {
    * Tóm tắt tiến độ chỉnh lý + đếm ngược đến 01/7/2030
    */
   @Get('review-summary')
-  getReviewSummary() {
-    return this.service.getReviewSummary();
+  @Roles(UserRole.ADMIN, UserRole.DEPARTMENT_HEAD)
+  getReviewSummary(@CurrentUser() actor: ReportActor) {
+    return this.service.getReviewSummary(reportDepartment(actor));
   }
 
   /**

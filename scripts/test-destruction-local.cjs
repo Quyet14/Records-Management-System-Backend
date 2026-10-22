@@ -123,10 +123,25 @@ async function main() {
       assert.throws(() => safePath(archive, 'junction/secret.pdf'), e => e.getStatus() === 409); checks++;
     } finally { if (fs.existsSync(path.join(archive, 'junction'))) fs.unlinkSync(path.join(archive, 'junction')); }
     const payload = () => ({ requestId: request.id, documentId: doc.id, leaseOwner: job.leaseOwner, snapshot: item.snapshot });
-    owners = [{ documentId: uuid(), status: 'stored', filename }];
+    const sharedOwnerId = uuid();
+    owners = [{ documentId: sharedOwnerId, status: 'stored', filename }];
+    assert.deepEqual(await local.inspectOwnership(doc.id, filename), {
+      hardLinks: '1', references: [{ id: sharedOwnerId, status: 'stored' }],
+    });
     await denied(() => local.call('content/inventory', payload()));
     owners = [];
+    // Distinct NTFS file IDs must not collide through floating-point rounding.
+    const realStat = fs.promises.stat;
+    owners = [{ documentId: sharedOwnerId, status: 'stored', filename: oldVersion }];
+    fs.promises.stat = async (file, options) => {
+      assert.equal(options?.bigint, true);
+      const stat = await realStat(file, options);
+      return { ...stat, dev: 1n, ino: file === filename ? 9007199254740992n : 9007199254740993n };
+    };
+    try { assert.deepEqual((await local.inspectOwnership(doc.id, filename)).references, []); }
+    finally { fs.promises.stat = realStat; owners = []; }
     const hard = path.join(root, 'hard.pdf'); fs.linkSync(filename, hard);
+    assert.equal((await local.inspectOwnership(doc.id, filename)).hardLinks, '2');
     await denied(() => local.call('content/inventory', payload())); fs.unlinkSync(hard);
     doc.legalHold = true; await denied(() => local.call('content/inventory', payload())); doc.legalHold = false;
     await denied(() => local.call('content/inventory', { ...payload(), leaseOwner: uuid() }));

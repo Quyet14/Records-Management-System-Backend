@@ -79,7 +79,7 @@ export class AuthController {
   }
 
   /**
-   * POST /auth/login — email + CAPTCHA, always send OTP to the registered mailbox.
+   * POST /auth/login — email + password + CAPTCHA, then send OTP to the registered mailbox.
    * Response: { requires_otp: true, user_id, email_hint, expires_in }
    */
   @Post('login')
@@ -87,7 +87,7 @@ export class AuthController {
   @Header('Cache-Control', 'no-store')
   async login(@Body() dto: LoginDto, @Req() req: Request) {
     await this.authService.verifyCaptcha(dto.captcha_id, dto.captcha_code);
-    const user = await this.authService.validateLoginEmail(dto.email);
+    const user = await this.authService.validateUser(dto.email, dto.password);
     return this.authService.loginStep1(user, req.ip);
   }
 

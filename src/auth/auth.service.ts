@@ -24,7 +24,6 @@ const OTP_TTL_MINUTES = 5;
 const OTP_MAX_ATTEMPTS = 5;
 const OTP_RESEND_INTERVAL_MS = 60_000;
 const OTP_MAX_REQUESTS_PER_HOUR = 10;
-const CONFIRM_TTL_MINUTES = 15;
 const RESET_TOKEN_TTL_MINUTES = 15;
 const CAPTCHA_TTL_MINUTES = 5;
 const CAPTCHA_MAX_ATTEMPTS = 5;
@@ -313,34 +312,6 @@ export class AuthService {
     if (!newPassword || newPassword.length < 8) throw new BadRequestException('Mật khẩu phải có ít nhất 8 ký tự');
   }
 
-  private async createPendingConfirmation(user: User, ipAddress?: string) {
-    await this.confirmRepo.delete({ user: { id: user.id }, isConsumed: false } as any);
-
-    const rawToken = crypto.randomBytes(32).toString('hex');
-    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
-    const expiresAt = new Date();
-    expiresAt.setMinutes(expiresAt.getMinutes() + CONFIRM_TTL_MINUTES);
-
-    const record = await this.confirmRepo.save(this.confirmRepo.create({
-      user: { id: user.id } as any,
-      tokenHash,
-      isConfirmed: false,
-      isConsumed: false,
-      ipAddress: ipAddress ?? null,
-      expiresAt,
-    }));
-
-    const baseUrl = this.configService.get<string>('APP_BASE_URL') || 'http://localhost:3000';
-    const confirmUrl = `${baseUrl}/auth/confirm-login?token=${rawToken}`;
-    await this.sendConfirmationEmail(user.email, user.fullName, confirmUrl);
-
-    return {
-      requires_email_confirmation: true,
-      pending_login_id: record.id,
-      expires_in: CONFIRM_TTL_MINUTES * 60,
-    };
-  }
-
   async confirmLoginByToken(rawToken: string) {
     const tokenHash = crypto.createHash('sha256').update(rawToken || '').digest('hex');
     const record = await this.confirmRepo.findOne({ where: { tokenHash } });
@@ -568,30 +539,4 @@ export class AuthService {
     } catch { throw new ServiceUnavailableException('Không thể gửi OTP. Vui lòng kiểm tra dịch vụ email.'); }
   }
 
-  private async sendConfirmationEmail(to: string, name: string, confirmUrl: string) {
-    const subject = '[LTHS] Xác nhận đăng nhập';
-    const html = `<div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto">
-      <h2 style="color:#1a365d">Xác nhận đăng nhập</h2>
-      <p>Xin chào <strong>${name}</strong>,</p>
-      <p>Nếu đây là bạn, hãy bấm nút bên dưới để hoàn tất đăng nhập:</p>
-      <p style="text-align:center;margin:24px 0"><a href="${confirmUrl}" style="background:#2b6cb0;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold">Đây là tôi, xác nhận đăng nhập</a></p>
-      <p>Liên kết có hiệu lực trong <strong>${CONFIRM_TTL_MINUTES} phút</strong>.</p>
-    </div>`;
-
-    if (this.mailer) {
-      try {
-        await this.mailer.sendMail({
-          from: this.configService.get<string>('SMTP_FROM') || 'LTHS <no-reply@lths.local>',
-          to,
-          subject,
-          html,
-        });
-      } catch (err) {
-        console.warn(`[Confirm] Không gửi được email tới ${to}:`, (err as Error).message);
-        console.warn(`[Confirm] Link (debug): ${confirmUrl}`);
-      }
-    } else {
-      console.log(`\n[CONFIRM DEBUG] Link: ${confirmUrl}\n`);
-    }
-  }
 }

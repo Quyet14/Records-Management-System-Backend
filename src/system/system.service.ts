@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { DataSource, LessThan, Repository } from 'typeorm';
@@ -255,18 +255,42 @@ export class SystemService {
   }
 
   // ─── Audit logs ───────────────────────────────────────────
+  private reportPagination(page: number, limit: number) {
+    if (!Number.isInteger(page) || page < 1 || page > 1000000 || !Number.isInteger(limit) || limit < 1 || limit > 100)
+      throw new BadRequestException('Thông tin phân trang không hợp lệ.');
+  }
+
+  async getMissingChecksums(page = 1, limit = 20, departmentId?: string) {
+    this.reportPagination(page, limit);
+    const qb = this.docRepo.createQueryBuilder('doc')
+      .select(['doc.id', 'doc.title', 'doc.originalFilename', 'doc.documentNumber', 'doc.status', 'doc.createdAt'])
+      .where("(doc.sha256Checksum IS NULL OR TRIM(doc.sha256Checksum) = '')")
+      .andWhere('doc.status != :destroyed', { destroyed: DocumentStatus.DESTROYED });
+    if (departmentId) qb.andWhere('doc.department_id = :reportDepartmentId', { reportDepartmentId: departmentId });
+    const [docs, total] = await qb.orderBy('doc.createdAt', 'DESC').addOrderBy('doc.id', 'ASC')
+      .skip((page - 1) * limit).take(limit).getManyAndCount();
+    return { data: docs.map(doc => ({ id: doc.id, title: doc.title || doc.originalFilename,
+      documentNumber: doc.documentNumber, status: doc.status, createdAt: doc.createdAt })), total, page, limit };
+  }
+
   async getAuditLogs(query: {
     action?: string;
     userId?: string;
     documentId?: string;
     page: number;
     limit: number;
-  }) {
+  }, departmentId?: string) {
+    this.reportPagination(query.page, query.limit);
     const qb = this.auditRepo
       .createQueryBuilder('log')
       .leftJoinAndSelect('log.actor', 'actor')
       .leftJoinAndSelect('log.document', 'document')
       .orderBy('log.createdAt', 'DESC');
+
+    if (departmentId) {
+      qb.andWhere('document.department_id = :reportDepartmentId', { reportDepartmentId: departmentId });
+      qb.andWhere('log.action IN (:...reportActions)', { reportActions: ['approve', 'reject', 'auto-approve (private)'] });
+    }
 
     if (query.action) {
       qb.andWhere('log.action = :action', { action: query.action });
@@ -291,7 +315,8 @@ export class SystemService {
         actorName:  (log.actor as any)?.fullName ?? (log.actor as any)?.email,
         documentId: (log.document as any)?.id,
         documentTitle: (log.document as any)?.title || (log.document as any)?.originalFilename,
-        metadata:   log.metadata,
+        metadata:   departmentId ? (log.action === 'reject' && typeof log.metadata?.reason === 'string'
+          ? { reason: log.metadata.reason } : {}) : log.metadata,
         createdAt:  log.createdAt,
       })),
       total, page, limit,

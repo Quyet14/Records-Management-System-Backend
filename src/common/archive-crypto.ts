@@ -177,7 +177,7 @@ export async function readArchiveBuffer(filename: string, expectedHash: string, 
   const chunks: Buffer[] = []; let size = 0;
   for await (const bytes of archiveChunks(filename, expectedHash)) {
     size += bytes.length;
-    if (size > maxBytes) throw new BadRequestException('PDF vượt giới hạn xử lý watermark.');
+    if (size > maxBytes) throw new BadRequestException('File vượt giới hạn xử lý trong bộ nhớ.');
     chunks.push(bytes);
   }
   return Buffer.concat(chunks);

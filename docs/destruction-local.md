@@ -184,7 +184,91 @@ node scripts/check-destruction.cjs --close-backup-session <session-uuid> --confi
 
 Lệnh ghi nhận session thất bại và dọn snapshot tạm của chính session đó, không báo backup thành công. Khi cần tắt dịch vụ, đặt cả `.env` và biến CMD DESTRUCTION_ENABLED=false rồi reload PM2 tương tự; tránh giữ giá trị true cũ trong môi trường PM2.
 
+## Hồ sơ biến mất khỏi kho nhưng chưa có trong “Đã hủy”
+
+Worker đặt `destruction_started_at` khi nhận việc để khóa nội dung khỏi kho và API đọc file. Chỉ khi có receipt xác minh xóa thành công, worker mới đặt trạng thái `destroyed` để hiện trong “Đã hủy”. Nếu đề nghị `failed` và item còn `pending`, chưa có manifest đã kiểm kê được lưu trong DB; việc hồ sơ không còn trong kho không chứng minh file đã được xóa.
+
+Chạy trên server sau khi cập nhật source và build:
+
+```cmd
+node scripts/check-destruction.cjs --document <document-uuid>
+pm2 logs lths-backend --lines 100 --nostream
+```
+
+Lệnh kiểm tra chỉ đọc, in trạng thái document/request/item/job, checkpoint và lỗi đã lưu; không in mật khẩu hoặc nội dung chứng từ. Worker mới lưu mã lỗi và bước lỗi vào `job.last_error`, ví dụ `[inventory:CONTENT_HASH_CHANGED]`. Lỗi cũ cần đối chiếu log PM2 tại thời điểm xử lý. Không tự đổi `status=destroyed`, xóa `destruction_started_at`, manifest hoặc SQLite để làm hồ sơ xuất hiện. Sau khi xử lý nguyên nhân và kiểm tra journal/receipts, dùng `scripts/retry-destruction.cjs` với request, tài khoản admin vận hành và lý do; lệnh giữ checkpoint để tiếp tục xác minh kết quả hủy.
+
+Với provider local và đề nghị lỗi, lệnh còn kiểm tra file gốc/phiên bản: `hardLinks` là số liên kết filesystem, `SHARED WITH` liệt kê ID hồ sơ/kho cá nhân khác đang trỏ cùng file. `SHARED_CONTENT` có thể là chia sẻ file thật (upload trùng được deduplicate), hard link hoặc lỗi so sánh inode ở bản cũ. Bản mới so sánh file ID bằng BigInt để tránh làm tròn ID NTFS lớn. Nếu còn tham chiếu thật, cần xử lý sở hữu nội dung dùng chung trước khi thử lại; không bỏ chặn bằng cách ép trạng thái hủy.
+
 ## Kiểm thử đã có
+
+### Giữ hồ sơ lưu kho và hủy một hồ sơ dùng chung file
+
+Với đề nghị đã lỗi ở bước kiểm kê (`item=pending`, chưa có checkpoint/tombstone), dùng `scripts/separate-retained-content.cjs`. Lệnh mặc định chỉ xem trước, kiểm tra checksum và liệt kê admin đang hoạt động. `--apply` tạo bản sao độc lập trong archive cho hồ sơ cần giữ, xác minh cả bytes vật lý và checksum nội dung (hỗ trợ container mã hóa), đồng bộ đường dẫn các phiên bản dùng chung, rồi ghi audit trong transaction. Hồ sơ giữ tiếp tục ở trạng thái lưu kho và dùng đường dẫn riêng với `file_id=NULL`, theo cơ chế đọc file độc lập hiện có. Không cần migration hoặc sửa trigger. File gốc, bảng `files` đã bị đóng băng và snapshot/OTP/lượt duyệt của hồ sơ cần hủy được giữ nguyên.
+
+Ví dụ đúng hai hồ sơ đã đối chiếu:
+
+```cmd
+npm run build
+node scripts/separate-retained-content.cjs --destroy 47526d2c-b80f-417b-ac1b-d7dfe10b86b0 --keep 7dcf644a-5a0e-45e1-b8d1-0891fc1b65dc
+```
+
+Nếu nguồn là file cũ chưa mã hóa, lệnh kiểm kê dùng checksum tin cậy của snapshot để xác minh mà không bật `ARCHIVE_ALLOW_LEGACY_READ`. Khi mã hóa archive đang bật, bản giữ lại được mã hóa thành `.lths` bằng keyring hiện có, rồi xác minh nội dung sau giải mã; file gốc vẫn nguyên trạng cho worker hủy. `encryptLegacyObjects` trong kết quả cho biết số object cần chuyển đổi. Cần cấu hình keyring hợp lệ trước khi áp dụng; không chạy chuyển đổi toàn kho lên hồ sơ đang bị đóng băng cho đề nghị hủy.
+
+Để lấy UUID admin ngay cả khi việc kiểm kê chưa qua:
+
+```cmd
+node scripts/separate-retained-content.cjs --list-admins
+```
+
+Chọn ID admin thực từ kết quả, thay `ADMIN_UUID` trong các lệnh sau:
+
+`ADMIN_UUID` là chỗ giữ chỗ, không phải ID hợp lệ. Chạy từng lệnh trên một dòng riêng, kết thúc `--apply` rồi nhấn Enter trước khi chạy `node scripts/check-destruction.cjs`; không ghép thành `--applynode`.
+
+```cmd
+node scripts/separate-retained-content.cjs --destroy 47526d2c-b80f-417b-ac1b-d7dfe10b86b0 --keep 7dcf644a-5a0e-45e1-b8d1-0891fc1b65dc --actor ADMIN_UUID --reason "Giu ho so luu kho, tach file truoc khi huy ho so trung" --apply
+node scripts/check-destruction.cjs --document 47526d2c-b80f-417b-ac1b-d7dfe10b86b0
+node scripts/check-destruction.cjs --document 7dcf644a-5a0e-45e1-b8d1-0891fc1b65dc
+```
+
+Hồ sơ cần hủy phải có `otherReferences=0`, `hardLinks=1`; hồ sơ cần giữ vẫn `stored`/`approved`, xem PDF được. Sao lưu DB và archive sau khi tách bằng quy trình backup hiện có (ví dụ `npm run data:backup-sync` nếu server đã cấu hình đầy đủ); xác nhận backup thành công trước khi requeue, vì bản backup trước tách chưa chứa đường dẫn bản sao mới. Sau đó:
+
+```cmd
+pm2 startOrReload ecosystem.config.js --env production --update-env
+node scripts/retry-destruction.cjs --request 4a8062aa-8681-477b-83cc-6fd8d3e2c6d8 --actor ADMIN_UUID --reason "Da tach va kiem tra ho so can giu, backup thanh cong" --apply
+```
+
+Worker xử lý ở chu kỳ tiếp theo khi đủ điều kiện. Kiểm tra lại: hồ sơ yêu cầu phải chuyển sang `destroyed` và hiện ở “Đã hủy”; hồ sơ giữ vẫn đọc được. Không tự rút ngắn thời gian chờ hoặc thay bằng chứng duyệt.
+
+Lệnh tách dừng nếu có hồ sơ thứ ba/kho cá nhân/hard link, legal hold, metadata không đồng nhất, checksum sai hoặc checkpoint hủy đã tồn tại. Nếu lỗi transaction/kết nối sau khi copy, giữ bản sao để tránh xóa nhầm khi chưa biết commit đã thành công hay chưa; chạy lại chế độ xem trước và đối chiếu audit. File gốc không bị lệnh tách xóa. Việc thử lại sau tách thành công là no-op. Lệnh không đổi cơ chế deduplicate cho các lần upload mới.
+
+Kiểm thử riêng:
+
+```cmd
+npm run build
+node scripts/test-separate-retained-content.cjs
+```
+
+## Kiểm thử workflow
+
+### Đề nghị lỗi INVALID_APPROVALS và không có lượt duyệt trong DB
+
+Nếu chẩn đoán báo `required=1`, `recorded=0`, audit “đã duyệt OTP” không thay thế được bản ghi trong `destruction_approvals`. Không chèn lượt duyệt giả hoặc requeue liên tục. Dùng `scripts/reopen-destruction-approval.cjs` để mở lại bước duyệt OTP thật. Lệnh kiểm tra tài khoản admin, snapshot, toàn bộ item và journal gốc; chỉ nhận đề nghị/job `failed`, không lease, không checkpoint/receipt/tombstone và không có lượt duyệt. Giữ nguyên chứng từ, audit cũ, snapshot và `destruction_started_at`.
+
+Sau khi cập nhật source, build và reload đúng môi trường đang vận hành (ví dụ server HTTP nội bộ hiện đang chạy development), xem trước:
+
+```cmd
+npm run build
+pm2 startOrReload ecosystem.config.js --env development --update-env
+node scripts/reopen-destruction-approval.cjs --request 4a8062aa-8681-477b-83cc-6fd8d3e2c6d8 --actor aad7cc0d-a8a6-11f1-bd7a-005056b755e9 --reason "Mo lai duyet OTP do DB khong co luot duyet"
+```
+
+Chỉ áp dụng nếu kế hoạch hợp lệ:
+
+```cmd
+node scripts/reopen-destruction-approval.cjs --request 4a8062aa-8681-477b-83cc-6fd8d3e2c6d8 --actor aad7cc0d-a8a6-11f1-bd7a-005056b755e9 --reason "Mo lai duyet OTP do DB khong co luot duyet" --apply
+```
+
+Tải lại chi tiết đề nghị và dùng tài khoản Admin (khác người lập) để kiểm tra chứng từ, nhận OTP và duyệt trên giao diện. Request trở về `pending`, job cũ chuyển `cancelled`; khi đủ lượt duyệt, backend lập lịch lại trên job này và giữ lịch sử số lần chạy. OTP cũ bị vô hiệu bởi version mới. Thời gian chờ đầy đủ 24 giờ được tính từ lượt duyệt mới, không dùng mốc cũ hoặc `retry-destruction.cjs` để bỏ qua. Nếu bản ghi duyệt vẫn bị mất sau khi duyệt mới, cần kiểm tra DB/restore thực tế.
 
 ```cmd
 npm run test:destruction-local

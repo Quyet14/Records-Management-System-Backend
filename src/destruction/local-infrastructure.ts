@@ -15,7 +15,7 @@ import { DestructionWorkflow1792368000000, DESTRUCTION_REQUIRED_TRIGGERS } from 
 import { Actor, approvalsValid, digest, eligible, fail, staff } from './destruction.rules';
 import { distinctRoots, hashFile, inside, LocalDestructionJournal, relativeKey, safePath, walk } from './local-storage';
 import { WindowsDefenderScanner } from './windows-defender-scanner';
-import { archiveChecksum } from '../common/archive-crypto';
+import { inspectDestructionContent } from './content-integrity';
 
 const execute = promisify(execFile);
 interface Target { key: string; label: string; root: string; purgeWithinDays: number; notes: string; versioning: string; authoritative: boolean; enabled?: boolean }
@@ -283,9 +283,10 @@ export class LocalDestructionInfrastructure implements OnModuleDestroy {
       text: `Mã OTP phê duyệt hủy hồ sơ: ${payload.otp}\nMã hết hạn lúc ${payload.expiresAt}. Không chia sẻ mã này.` });
     return { delivered: result.accepted?.some(address => String(address).toLowerCase() === actor.email.toLowerCase()) === true };
   }
-  private async ownership(documentId: string, filename: string) {
-    const expected = await fs.promises.stat(filename);
-    if (expected.nlink !== 1) fail(409, 'SHARED_CONTENT', 'File có hard link; không thể xác nhận sở hữu độc lập.');
+  /** Read-only ownership report for operators; does not initialize or change the journal. */
+  async inspectOwnership(documentId: string, filename: string) {
+    // Windows file IDs can exceed Number's integer precision. Compare the exact IDs.
+    const expected = await fs.promises.stat(filename, { bigint: true });
     // Separate queries also support legacy tables with different UUID/path collations.
     const groups = await Promise.all([
       this.db.manager.query('SELECT d.id AS documentId,d.status,d.storage_path AS filename FROM documents d LIMIT 100001'),
@@ -295,14 +296,21 @@ export class LocalDestructionInfrastructure implements OnModuleDestroy {
     ]);
     const owners = groups.flat();
     if (owners.length > 100000) fail(409, 'OWNERSHIP_SCAN_LIMIT', 'Kho cần bộ kiểm kê sở hữu có chỉ mục trước khi hủy.');
+    const references = new Map<string, { id: string; status: string }>();
     for (const owner of owners) {
       if ((owner.documentId === documentId && owner.status !== 'personal') || owner.status === 'destroyed' || !owner.filename) continue;
       try {
-        const stat = await fs.promises.stat(path.resolve(owner.filename));
-        if (fs.realpathSync(owner.filename) === fs.realpathSync(filename) || (stat.ino !== 0 && stat.ino === expected.ino && stat.dev === expected.dev))
-          fail(409, 'SHARED_CONTENT', 'Nội dung còn được hồ sơ hoặc kho cá nhân khác sử dụng.');
+        const stat = await fs.promises.stat(path.resolve(owner.filename), { bigint: true });
+        if (fs.realpathSync(owner.filename) === fs.realpathSync(filename) || (stat.ino !== 0n && stat.ino === expected.ino && stat.dev === expected.dev))
+          references.set(`${owner.status}:${owner.documentId}`, { id: owner.documentId, status: owner.status });
       } catch (e) { if (e.code !== 'ENOENT') throw e; }
     }
+    return { hardLinks: expected.nlink.toString(), references: [...references.values()] };
+  }
+  private async ownership(documentId: string, filename: string) {
+    const report = await this.inspectOwnership(documentId, filename);
+    if (report.hardLinks !== '1') fail(409, 'SHARED_CONTENT', 'File có hard link; không thể xác nhận sở hữu độc lập.');
+    if (report.references.length) fail(409, 'SHARED_CONTENT', 'Nội dung còn được hồ sơ hoặc kho cá nhân khác sử dụng.');
   }
   private async currentDocument(payload: any) {
     const doc = await this.db.manager.findOne(Document, { where: { id: payload.documentId }, relations: ['file', 'documentType'] });
@@ -340,7 +348,7 @@ export class LocalDestructionInfrastructure implements OnModuleDestroy {
       await this.ownership(doc.id, filename);
       const sha256 = await hashFile(filename);
       // Snapshots bind plaintext; the deletion manifest binds the exact encrypted bytes.
-      const plaintextHash = await archiveChecksum(filename, row.sha256_checksum);
+      const { checksum: plaintextHash } = await inspectDestructionContent(filename, row.sha256_checksum);
       if (!/^[a-f0-9]{64}$/i.test(row.sha256_checksum || '') || plaintextHash !== row.sha256_checksum)
         fail(409, 'CONTENT_HASH_CHANGED', 'Checksum file hoặc phiên bản không khớp snapshot tin cậy.');
       objects.push({ key, sha256, sizeBytes: fs.statSync(filename).size });

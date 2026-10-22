@@ -11,7 +11,6 @@ const { ConfigService } = require('@nestjs/config');
 const { JwtService } = require('@nestjs/jwt');
 const C = require('../dist/common/archive-crypto');
 const { inspectUpload } = require('../dist/common/upload-inspection');
-const { WatermarkService } = require('../dist/common/watermark/watermark.service');
 const { DocumentsService } = require('../dist/documents/documents.service');
 const { DocumentAccessGuard } = require('../dist/common/guards/document-access.guard');
 const { JwtAuthGuard } = require('../dist/common/guards/jwt-auth.guard');
@@ -115,13 +114,11 @@ async function main() {
     const again = path.join(archive, `${crypto.randomUUID()}.lths`);
     await C.encryptArchiveFile(source, again, sha(pdfBytes));
     assert.notDeepEqual(fs.readFileSync(destination), fs.readFileSync(again), 'Per-file keys/salts must randomize identical content');
-    const watermark = new WatermarkService();
-    const marked = await watermark.embedWatermark(await C.readArchiveBuffer(destination, sha(pdfBytes)), { userName: 'Nguyễn Văn A', userEmail: 'a@example.test' });
-    assert.equal((await PDFDocument.load(marked)).getPageCount(), 1); assert.notDeepEqual(marked, pdfBytes);
-    await reject(() => watermark.embedWatermark(Buffer.from('bad pdf'), { userName: 'A', userEmail: '' }));
+    assert.deepEqual(await C.readArchiveBuffer(destination, sha(pdfBytes)), pdfBytes, 'PDF viewing must preserve the uploaded bytes');
     await reject(() => C.archiveChecksum(source, sha(pdfBytes)), 503);
     process.env.ARCHIVE_ALLOW_LEGACY_READ = 'true';
     assert.equal(await C.archiveChecksum(source, sha(pdfBytes)), sha(pdfBytes));
+    await reject(() => C.archiveChecksum(source, '0'.repeat(64)), 409);
     process.env.ARCHIVE_ALLOW_LEGACY_READ = 'false';
     const ring = process.env.ARCHIVE_KEY_FILE;
     process.env.ARCHIVE_KEY_FILE = path.join(archive, 'keys.json'); fs.copyFileSync(ring, process.env.ARCHIVE_KEY_FILE);
@@ -282,7 +279,7 @@ async function main() {
       query: async sql => { queries.push(sql); return []; } });
     assert(queries.some(sql => sql.includes('BEFORE UPDATE ON audit_logs') && sql.includes('AUDIT_APPEND_ONLY')));
     assert(queries.some(sql => sql.includes('BEFORE DELETE ON audit_logs') && sql.includes('AUDIT_APPEND_ONLY')));
-    console.log(`PASS: AES-GCM boundary cases/tampering, upload inspection, mandatory watermark, view grant/token scope, ciphertext destruction inventory, audit context, shared throttling and periodic integrity (${checks} rejection cases).`);
+    console.log(`PASS: AES-GCM boundary cases/tampering, upload inspection, original PDF preservation, view grant/token scope, ciphertext destruction inventory, audit context, shared throttling and periodic integrity (${checks} rejection cases).`);
     console.log('LIMIT: live MySQL triggers/locking, real ClamAV, reverse proxy TLS and browser embedding require deployment acceptance.');
   } finally {
     for (const name of Object.keys(process.env)) if (!(name in saved)) delete process.env[name];

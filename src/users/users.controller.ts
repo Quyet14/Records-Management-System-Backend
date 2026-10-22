@@ -18,7 +18,7 @@ import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { UserRole } from '../entities/user.entity';
-import { ProfileSecurityAuthGuard, RecentAuthGuard } from '../common/guards/recent-auth.guard';
+import { PermissionUpdateAuthGuard, ProfileSecurityAuthGuard, RecentAuthGuard } from '../common/guards/recent-auth.guard';
 
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('users')
@@ -63,7 +63,7 @@ export class UsersController {
   }
 
   @Patch(':id/permissions')
-  @UseGuards(RecentAuthGuard)
+  @UseGuards(PermissionUpdateAuthGuard)
   @Roles(UserRole.ADMIN, UserRole.DEPARTMENT_HEAD)
   updatePermissions(
     @Param('id') id: string,

@@ -9,7 +9,6 @@ import { DocumentsService } from './documents.service';
 import { DocumentsController } from './documents.controller';
 import { ExportService } from '../export/export.service';
 import { RetentionModule } from '../retention/retention.module';
-import { WatermarkService } from '../common/watermark/watermark.service';
 import { AuthModule } from '../auth/auth.module';
 import { ViewRequest } from '../entities/view-request.entity';
 import { AccessLog } from '../entities/access-log.entity';
@@ -21,7 +20,7 @@ import { DocumentAccessGuard } from '../common/guards/document-access.guard';
     AuthModule,
     RetentionModule,
   ],
-  providers: [DocumentsService, ExportService, WatermarkService, DocumentAccessGuard],
+  providers: [DocumentsService, ExportService, DocumentAccessGuard],
   controllers: [DocumentsController],
 })
 export class DocumentsModule {}

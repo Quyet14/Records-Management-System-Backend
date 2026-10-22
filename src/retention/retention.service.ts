@@ -5,7 +5,7 @@ import { LessThan, Repository, IsNull, Not, LessThanOrEqual } from 'typeorm';
 import { Document, ClassificationValue, ReviewStatus, DocumentStatus } from '../entities/document.entity';
 import { RetentionBasis } from '../entities/document-type.entity';
 import { assertDocumentMutable } from '../common/document-lifecycle';
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { AuditLog } from '../entities/audit-log.entity';
 
 /** Hạn chót chỉnh lý tài liệu trước 01/7/2025 theo Luật 01/2011/QH13 */
@@ -105,17 +105,23 @@ export class RetentionService {
   /**
    * Trả về tài liệu có expiresAt trong vòng EXPIRY_WARNING_DAYS ngày tới.
    */
-  async getExpiringDocuments(days = EXPIRY_WARNING_DAYS) {
+  private documents(departmentId?: string) {
+    const qb = this.docRepo.createQueryBuilder('doc');
+    if (departmentId) qb.andWhere('doc.department_id = :reportDepartmentId', { reportDepartmentId: departmentId });
+    return qb;
+  }
+
+  async getExpiringDocuments(days = EXPIRY_WARNING_DAYS, departmentId?: string) {
+    if (!Number.isInteger(days) || days < 1 || days > 36500) throw new BadRequestException("Invalid days.");
     const now = new Date();
     const threshold = new Date();
     threshold.setDate(threshold.getDate() + days);
 
-    const docs = await this.docRepo
-      .createQueryBuilder('doc')
+    const docs = await this.documents(departmentId)
       .leftJoinAndSelect('doc.department', 'department')
       .leftJoinAndSelect('doc.documentType', 'documentType')
       .leftJoinAndSelect('doc.uploader', 'uploader')
-      .where('doc.expires_at IS NOT NULL')
+      .andWhere('doc.expires_at IS NOT NULL')
       .andWhere('doc.expires_at > :now', { now })
       .andWhere('doc.expires_at <= :threshold', { threshold })
       .andWhere('doc.status = :status', { status: DocumentStatus.STORED })
@@ -129,7 +135,7 @@ export class RetentionService {
       documentType: (d.documentType as any)?.name ?? '—',
       expiresAt: d.expiresAt,
       daysRemaining: Math.ceil(
-        (d.expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60 * 24),
+        (new Date(d.expiresAt).getTime() - now.getTime()) / (1000 * 60 * 60 * 24),
       ),
     }));
   }
@@ -140,17 +146,18 @@ export class RetentionService {
    * Tài liệu hình thành trước 01/7/2025, chưa hoàn thành chỉnh lý.
    * Hạn chót: 01/7/2030.
    */
-  async getPendingReviewDocuments(page = 1, limit = 20) {
-    const [data, total] = await this.docRepo
-      .createQueryBuilder('doc')
+  async getPendingReviewDocuments(page = 1, limit = 20, departmentId?: string) {
+    if (!Number.isInteger(page) || page < 1 || page > 1000000 || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new BadRequestException("Invalid pagination.");
+    const [data, total] = await this.documents(departmentId)
       .leftJoinAndSelect('doc.department', 'department')
       .leftJoinAndSelect('doc.documentType', 'documentType')
       .leftJoinAndSelect('doc.uploader', 'uploader')
-      .where('doc.document_date < :cutoff OR (doc.document_date IS NULL AND doc.created_at < :cutoff)', {
+      .andWhere('(doc.document_date < :cutoff OR (doc.document_date IS NULL AND doc.created_at < :cutoff))', {
         cutoff: OLD_DOC_CUTOFF,
       })
       .andWhere('doc.review_status != :done', { done: ReviewStatus.COMPLETED })
-      .orderBy('doc.document_date', 'ASC')
+      .orderBy('doc.documentDate', 'ASC')
+      .addOrderBy('doc.id', 'ASC')
       .skip((page - 1) * limit)
       .take(limit)
       .getManyAndCount();
@@ -178,19 +185,18 @@ export class RetentionService {
   }
 
   /** Thống kê tóm tắt về chỉnh lý */
-  async getReviewSummary() {
+  async getReviewSummary(departmentId?: string) {
     const now = new Date();
     const daysToDeadline = Math.ceil(
       (REVIEW_DEADLINE.getTime() - now.getTime()) / (1000 * 60 * 60 * 24),
     );
 
     // Đếm tài liệu trước 01/7/2025 theo từng trạng thái chỉnh lý
-    const rows = await this.docRepo
-      .createQueryBuilder('doc')
+    const rows = await this.documents(departmentId)
       .select('doc.review_status', 'reviewStatus')
       .addSelect('COUNT(*)', 'count')
-      .where(
-        'doc.document_date < :cutoff OR (doc.document_date IS NULL AND doc.created_at < :cutoff)',
+      .andWhere(
+        '(doc.document_date < :cutoff OR (doc.document_date IS NULL AND doc.created_at < :cutoff))',
         { cutoff: OLD_DOC_CUTOFF },
       )
       .groupBy('doc.review_status')

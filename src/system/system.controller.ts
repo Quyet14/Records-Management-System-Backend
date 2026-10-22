@@ -6,6 +6,8 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { UserRole } from '../entities/user.entity';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { ReportActor, reportDepartment } from '../common/report-scope';
 
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.ADMIN)
@@ -51,7 +53,9 @@ export class SystemController {
    * ?action=approve&userId=...&documentId=...&page=1&limit=20
    */
   @Get('audit-logs')
+  @Roles(UserRole.ADMIN, UserRole.DEPARTMENT_HEAD)
   getAuditLogs(
+    @CurrentUser() actor: ReportActor,
     @Query('action')     action?: string,
     @Query('userId')     userId?: string,
     @Query('documentId') documentId?: string,
@@ -62,8 +66,15 @@ export class SystemController {
       action,
       userId,
       documentId,
-      page:  page  ? parseInt(page,  10) : 1,
-      limit: limit ? parseInt(limit, 10) : 20,
-    });
+      page:  page  ? Number(page) : 1,
+      limit: limit ? Number(limit) : 20,
+    }, reportDepartment(actor));
+  }
+
+  /** Read metadata only; does not scan server files or expose physical storage paths. */
+  @Get('missing-checksums')
+  @Roles(UserRole.ADMIN, UserRole.DEPARTMENT_HEAD)
+  getMissingChecksums(@CurrentUser() actor: ReportActor, @Query('page') page?: string, @Query('limit') limit?: string) {
+    return this.service.getMissingChecksums(page ? Number(page) : 1, limit ? Number(limit) : 20, reportDepartment(actor));
   }
 }

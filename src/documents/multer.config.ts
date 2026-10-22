@@ -25,6 +25,8 @@ export const multerOptions = {
   },
   limits: {
     fileSize: MAX_UPLOAD_FILE_SIZE_BYTES,
-    files: 20, fields: 100, fieldSize: 65536, parts: 121,
+    // Extracted PDF text can exceed 64 KiB, especially with Vietnamese UTF-8.
+    // Keep a finite limit below the MEDIUMTEXT capacity used by description.
+    files: 20, fields: 100, fieldSize: 8 * 1024 * 1024, parts: 121,
   },
 };

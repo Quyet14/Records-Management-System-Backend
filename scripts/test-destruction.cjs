@@ -234,8 +234,26 @@ async function main() {
   const fscheduled = await service.approve(failing.id, { challengeId: c.challengeId, otp: codes.get(c.challengeId), documentsReviewed: true }, '"1"', uuid(), senior1);
   store.setNow(fscheduled.executeAfter); deleteFails = true;
   worker.logger = { error() {} };
+  // Inventory failure reproduces a hidden document whose per-item result is still pending.
+  const callBeforeInventoryFailure = infrastructure.call;
+  infrastructure.call = async (operation, payload) => {
+    if (operation === 'content/inventory') rules.fail(409, 'CONTENT_HASH_CHANGED', 'private path / SQL details');
+    return callBeforeInventoryFailure(operation, payload);
+  };
+  await worker.run(failing.id);
+  assert.equal(store.rows(E.DestructionItem).find(i => i.requestId === failing.id).status, 'pending');
+  assert(store.rows(Document).find(d => d.id === failureDoc.id).destructionStartedAt);
+  assert.equal(store.rows(Document).find(d => d.id === failureDoc.id).destroyedAt, null);
+  const inventoryError = store.rows(E.DestructionJob).find(j => j.requestId === failing.id).lastError;
+  assert.match(inventoryError, /\[inventory:CONTENT_HASH_CHANGED\]$/);
+  assert(!inventoryError.includes('private path'));
+  infrastructure.call = callBeforeInventoryFailure;
+  store.rows(E.DestructionRequest).find(r => r.id === failing.id).status = 'scheduled';
+  store.rows(E.DestructionJob).find(j => j.requestId === failing.id).status = 'scheduled';
   await worker.run(failing.id);
   assert.equal(store.rows(E.DestructionRequest).find(r => r.id === failing.id).status, 'failed');
+  assert.match(store.rows(E.DestructionJob).find(j => j.requestId === failing.id).lastError, /\[destroy:INFRASTRUCTURE_ERROR\]$/);
+  assert(!store.rows(E.DestructionJob).find(j => j.requestId === failing.id).lastError.includes('partial deletion'));
   assert.equal(store.rows(Document).find(d => d.id === failureDoc.id).status, 'stored');
   assert.equal(store.rows(E.DestructionItem).find(i => i.requestId === failing.id).status, 'deleting');
   assert(store.rows(E.DestructionItem).find(i => i.requestId === failing.id).executionResult.manifest);
@@ -534,7 +552,59 @@ async function main() {
   store.rows(User).find(u => u.id === user.id).department = null;
   await status(() => service.create(bodyFor([userDoc]), files, user, uuid()), 403);
   store.rows(User).find(u => u.id === user.id).department = { id: 'dept-a' };
-  console.log(`PASS: destruction workflow, user ownership/department restrictions, OTP attempt persistence/replay, policy, two-person approval, withdrawal, worker checkpoints, backups, content guards, retention and migration metadata (${checks} rejection cases).`);
+  // A scheduled legacy request with zero recorded approvals must obtain a real new OTP.
+  const { reopen, assertNoDeletionEvidence } = require('./reopen-destruction-approval.cjs');
+  const recoveryDoc = fixture(); store.rows(Document).push(recoveryDoc);
+  const recovery = await service.create(bodyFor([recoveryDoc]), files, creator, uuid());
+  const recoveryRow = () => store.rows(E.DestructionRequest).find(row => row.id === recovery.id);
+  const recoveryJob = () => store.rows(E.DestructionJob).find(row => row.requestId === recovery.id);
+  const recoveryItem = () => store.rows(E.DestructionItem).find(row => row.requestId === recovery.id);
+  recoveryRow().status = 'failed'; recoveryRow().failureReason = 'INVALID_APPROVALS';
+  store.rows(Document).find(row => row.id === recoveryDoc.id).destructionStartedAt = NOW;
+  store.rows(E.DestructionJob).push({ requestId: recovery.id, status: 'failed', attempts: 7,
+    runAt: NOW, checkpoint: null, leaseOwner: null, leaseExpiry: null, lastError: 'INVALID_APPROVALS' });
+  const previewRecovery = await store.db.transaction('READ COMMITTED', m => reopen(m, recovery.id, reviewer.id, 'Missing approvals'));
+  assert.equal(previewRecovery.applied, false); assert.equal(recoveryRow().status, 'failed');
+  await assert.rejects(() => store.db.transaction('READ COMMITTED', m => reopen(m, recovery.id, user.id, 'Missing approvals', true)), /active admin/);
+  recoveryItem().executionResult = { manifest: {} };
+  await assert.rejects(() => store.db.transaction('READ COMMITTED', m => reopen(m, recovery.id, reviewer.id, 'Missing approvals', true)), /prepared or destroyed/);
+  recoveryItem().executionResult = null;
+  const extraApproval = { requestId: recovery.id, userId: reviewer.id };
+  store.rows(E.DestructionApproval).push(extraApproval);
+  await assert.rejects(() => store.db.transaction('READ COMMITTED', m => reopen(m, recovery.id, reviewer.id, 'Missing approvals', true)), /Existing approvals/);
+  store.rows(E.DestructionApproval).splice(store.rows(E.DestructionApproval).findIndex(row => row.requestId === recovery.id), 1);
+  const recoverySnapshot = structuredClone(recoveryItem().snapshot);
+  await store.db.transaction('READ COMMITTED', m => reopen(m, recovery.id, reviewer.id, 'Missing approvals', true));
+  assert.equal(recoveryRow().status, 'pending'); assert.equal(recoveryRow().executeAfter, null);
+  assert.equal(recoveryJob().status, 'cancelled'); assert.equal(recoveryJob().attempts, 7);
+  assert.deepEqual(recoveryItem().snapshot, recoverySnapshot);
+  assert(store.rows(Document).find(row => row.id === recoveryDoc.id).destructionStartedAt);
+  assert.equal(store.rows(E.DestructionApproval).filter(row => row.requestId === recovery.id).length, 0);
+  const recoveryVersion = `"${recoveryRow().version}"`;
+  const recoveryChallenge = await service.challenge(recovery.id, { purpose: 'approve' }, recoveryVersion, reviewer);
+  const recoveryBody = { challengeId: recoveryChallenge.challengeId, otp: codes.get(recoveryChallenge.challengeId), documentsReviewed: true };
+  recoveryJob().checkpoint = { phase: 'deleting' };
+  await status(() => service.approve(recovery.id, recoveryBody, recoveryVersion, uuid(), reviewer), 409);
+  assert.equal(store.rows(E.DestructionApproval).filter(row => row.requestId === recovery.id).length, 0);
+  recoveryJob().checkpoint = null;
+  const clockBeforeRecovery = await service.now();
+  const rescheduledRecovery = await service.approve(recovery.id, recoveryBody, recoveryVersion, uuid(), reviewer);
+  assert.equal(rescheduledRecovery.status, 'scheduled');
+  assert.equal(new Date(rescheduledRecovery.executeAfter).getTime(), clockBeforeRecovery.getTime() + rules.WAIT_MS);
+  assert.equal(recoveryJob().attempts, 7);
+  assert.equal(store.rows(E.DestructionJob).filter(row => row.requestId === recovery.id).length, 1);
+  await worker.run(recovery.id);
+  assert.equal(store.rows(Document).find(row => row.id === recoveryDoc.id).status, 'stored');
+  store.setNow(rescheduledRecovery.executeAfter); await worker.run(recovery.id);
+  assert.equal(store.rows(Document).find(row => row.id === recoveryDoc.id).status, 'destroyed');
+  const evidenceJournal = records => ({ *iterate(kind) { yield* records[kind] || []; } });
+  assertNoDeletionEvidence(evidenceJournal({ manifest: [{ id: 'm', requestId: recovery.id }] }), recovery.id);
+  for (const records of [
+    { exclusion: [{ requestId: recovery.id }] },
+    { manifest: [{ id: 'm', requestId: recovery.id }], object: [{ manifestId: 'm', state: 'intent' }] },
+    { manifest: [{ id: 'm', requestId: recovery.id }], deletion: [{ manifestId: 'm' }] },
+  ]) assert.throws(() => assertNoDeletionEvidence(evidenceJournal(records), recovery.id), /Journal contains/);
+  console.log(`PASS: destruction workflow, OTP reapproval recovery, user ownership/department restrictions, OTP attempt persistence/replay, policy, two-person approval, withdrawal, worker checkpoints, backups, content guards, retention and migration metadata (${checks} rejection cases).`);
   console.log('LIMIT: offline transaction simulation; live MySQL row-lock races, DDL and SAN/gateway acceptance remain staging checks.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

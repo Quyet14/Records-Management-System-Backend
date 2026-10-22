@@ -1,8 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { OnEvent } from '@nestjs/event-emitter';
-import { createTransport, Transporter } from 'nodemailer';
 import { Subject } from 'rxjs';
 import { Notification, NotificationType } from '../entities/notification.entity';
 import { User, UserRole } from '../entities/user.entity';
@@ -58,9 +57,6 @@ export interface ViewRequestDecisionEvent {
 
 @Injectable()
 export class NotificationsService {
-  private readonly logger = new Logger(NotificationsService.name);
-  private mailer: Transporter | null = null;
-
   // SSE: per-user Subject map  userId → Subject<MessageEvent>
   private readonly sseStreams = new Map<string, Subject<MessageEvent>>();
 
@@ -68,26 +64,7 @@ export class NotificationsService {
     @InjectRepository(Notification) private notiRepo: Repository<Notification>,
     @InjectRepository(User) private userRepo: Repository<User>,
     @InjectRepository(Document) private docRepo: Repository<Document>,
-  ) {
-    this.initMailer();
-  }
-
-  private initMailer() {
-    const host = process.env.SMTP_HOST;
-    if (!host) {
-      this.logger.warn('SMTP_HOST không được cấu hình — email sẽ bị bỏ qua');
-      return;
-    }
-    this.mailer = createTransport({
-      host,
-      port: parseInt(process.env.SMTP_PORT || '587', 10),
-      secure: process.env.SMTP_SECURE === 'true',
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
-      },
-    });
-  }
+  ) {}
 
   // ─── SSE stream management ────────────────────────────────
   getStream(userId: string): Subject<MessageEvent> {
@@ -138,20 +115,6 @@ export class NotificationsService {
     return saved;
   }
 
-  private async sendEmail(to: string, subject: string, html: string) {
-    if (!this.mailer) return;
-    try {
-      await this.mailer.sendMail({
-        from: process.env.SMTP_FROM || 'LTHS Lưu Trữ <no-reply@lths.local>',
-        to,
-        subject,
-        html,
-      });
-    } catch (err) {
-      this.logger.error(`Gửi email thất bại tới ${to}: ${(err as Error).message}`);
-    }
-  }
-
   // ─── Event handlers ───────────────────────────────────────
 
   @OnEvent('document.approved')
@@ -160,13 +123,6 @@ export class NotificationsService {
     const message = `Tài liệu "${evt.documentTitle}" của bạn đã được ${evt.actorName} duyệt và lưu trữ.`;
 
     await this.saveAndPush(evt.uploaderId, NotificationType.DOCUMENT_APPROVED, title, message, evt.documentId);
-    await this.sendEmail(
-      evt.uploaderEmail,
-      `[LTHS] ${title}`,
-      `<p>Xin chào <strong>${evt.uploaderName}</strong>,</p>
-       <p>${message}</p>
-       <p>Trân trọng,<br>Hệ thống LTHS Lưu Trữ</p>`,
-    );
   }
 
   @OnEvent('document.uploaded')
@@ -200,17 +156,9 @@ export class NotificationsService {
   @OnEvent('document.rejected')
   async onDocumentRejected(evt: DocumentStatusEvent) {
     const title = 'Tài liệu bị từ chối';
-    const reasonLine = evt.rejectReason ? `<br><strong>Lý do:</strong> ${evt.rejectReason}` : '';
     const message = `Tài liệu "${evt.documentTitle}" bị từ chối bởi ${evt.actorName}.${evt.rejectReason ? ' Lý do: ' + evt.rejectReason : ''}`;
 
     await this.saveAndPush(evt.uploaderId, NotificationType.DOCUMENT_REJECTED, title, message, evt.documentId);
-    await this.sendEmail(
-      evt.uploaderEmail,
-      `[LTHS] ${title}`,
-      `<p>Xin chào <strong>${evt.uploaderName}</strong>,</p>
-       <p>Tài liệu <strong>"${evt.documentTitle}"</strong> đã bị từ chối.${reasonLine}</p>
-       <p>Trân trọng,<br>Hệ thống LTHS Lưu Trữ</p>`,
-    );
   }
 
   @OnEvent('role.changed')
@@ -222,13 +170,6 @@ export class NotificationsService {
     const message = `Vai trò của bạn đã được cập nhật từ "${roleLabel[evt.oldRole] ?? evt.oldRole}" thành "${roleLabel[evt.newRole] ?? evt.newRole}".`;
 
     await this.saveAndPush(evt.targetUserId, NotificationType.ROLE_CHANGED, title, message);
-    await this.sendEmail(
-      evt.targetEmail,
-      `[LTHS] ${title}`,
-      `<p>Xin chào <strong>${evt.targetName}</strong>,</p>
-       <p>${message}</p>
-       <p>Trân trọng,<br>Hệ thống LTHS Lưu Trữ</p>`,
-    );
   }
 
   // ─── API methods ──────────────────────────────────────────
@@ -260,11 +201,6 @@ export class NotificationsService {
             message,
             evt.documentId,
           );
-          await this.sendEmail(
-            recipient.email,
-            `[LTHS] ${title}`,
-            `<p>${message}</p><p><strong>Ly do:</strong> ${evt.reason}</p>`,
-          );
         }),
     );
   }
@@ -281,15 +217,6 @@ export class NotificationsService {
       message,
       evt.documentId,
     );
-    if (evt.requesterEmail) {
-      await this.sendEmail(
-        evt.requesterEmail,
-        `[LTHS] ${title}`,
-        `<p>Xin chao <strong>${evt.requesterName ?? ''}</strong>,</p>
-         <p>${message}</p>
-         <p>Han xem: ${evt.accessExpiresAt?.toISOString() ?? 'khong ro'}</p>`,
-      );
-    }
   }
 
   @OnEvent('view-request.rejected')
@@ -304,14 +231,6 @@ export class NotificationsService {
       message,
       evt.documentId,
     );
-    if (evt.requesterEmail) {
-      await this.sendEmail(
-        evt.requesterEmail,
-        `[LTHS] ${title}`,
-        `<p>Xin chao <strong>${evt.requesterName ?? ''}</strong>,</p>
-         <p>${message}</p>`,
-      );
-    }
   }
 
   getMyNotifications(user: DocumentSecurityUser, unreadOnly = false) {

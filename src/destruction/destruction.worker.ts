@@ -81,6 +81,7 @@ export class DestructionWorker {
     let claimed = false;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     let heartbeatBusy = false;
+    let phase = 'claim';
     try {
       claimed = await this.claim(id, owner);
       if (!claimed) return;
@@ -90,12 +91,14 @@ export class DestructionWorker {
         void this.locked(id, owner, async () => {}).catch(() => {}).finally(() => { heartbeatBusy = false; });
       }, 20000);
       heartbeat.unref();
+      phase = 'load_items';
       const request = await this.db.manager.findOneByOrFail(Request, { id });
       const items = await this.db.manager.find(Item, { where: { requestId: id }, order: { documentId: 'ASC' } });
       for (const item of items) {
         if (item.status === 'destroyed') continue;
         let manifest = item.executionResult?.manifest;
         if (!manifest) {
+          phase = 'inventory';
           const doc = (await this.service.documents(this.db.manager, [item.documentId]))[0];
           const versions = await this.db.manager.query('SELECT id, version, storage_path, sha256_checksum FROM document_versions WHERE document_id = ? ORDER BY version', [doc.id]);
           // Trusted inventory must reject shared objects, missing initial files and paths outside its configured realpath SAN root.
@@ -116,6 +119,7 @@ export class DestructionWorker {
         }
         // The immutable policy records unused destinations; only actual stores receive tombstones.
         for (const target of request.backupPolicy.targets.filter(t => t.enabled !== false)) {
+          phase = 'backup_exclusion';
           const operationId = digest([id, item.documentId, target.key]);
           const exclusion = await this.infrastructure.call('backup/exclude', { operationId, requestId: id, documentId: item.documentId,
             target: target.key, objects: manifest.objects, backupPolicy: request.backupPolicy });
@@ -129,12 +133,14 @@ export class DestructionWorker {
           });
         }
         // Persist intent before invoking an irreversible operation; gateway recovers its object WAL on replay.
+        phase = 'prepare_deletion';
         await this.locked(id, owner, async (m, r, job, now) => {
           await this.service.checkItems(m, r, now, true);
           item.status = 'deleting'; await m.save(Item, item);
           job.checkpoint = { documentId: item.documentId, phase: 'deleting' }; await m.save(Job, job);
         });
         const operationId = item.executionResult.operationId;
+        phase = 'destroy';
         const receipt = await this.infrastructure.call('content/destroy', { operationId, requestId: id,
           documentId: item.documentId, manifestId: manifest.id, manifestDigest: digest(manifest), leaseOwner: owner });
         if (receipt.operationId !== operationId || receipt.manifestId !== manifest.id || receipt.verifiedAbsent !== true
@@ -142,6 +148,7 @@ export class DestructionWorker {
           || !Array.isArray(receipt.objects) || receipt.objects.length !== manifest.objects.length
           || !manifest.objects.every(o => receipt.objects.some(r => r.key === o.key && r.sha256 === o.sha256 && r.verifiedAbsent === true && r.evidenceId)))
           fail(503, 'DELETION_UNCONFIRMED', 'Chưa xác nhận xóa toàn bộ nội dung. Cần kiểm tra vận hành.');
+        phase = 'confirm_deletion';
         await this.locked(id, owner, async (m, r, job, now) => {
           const doc = (await this.service.documents(m, [item.documentId], true))[0];
           if (doc.legalHold || doc.destructionRequestId !== id) fail(409, 'DOCUMENT_CHANGED', 'Điều kiện hồ sơ đã thay đổi.');
@@ -153,6 +160,7 @@ export class DestructionWorker {
           await this.service.audit(m, null, r, `Đã xác nhận hủy hồ sơ ${item.snapshot.code}`, r.status);
         });
       }
+      phase = 'finalize';
       await this.locked(id, owner, async (m, r, job, now) => {
         const remaining = await m.getRepository(Item).createQueryBuilder('i').where('i.requestId = :id AND i.status != :status', { id, status: 'destroyed' }).getCount();
         if (remaining) fail(409, 'DESTRUCTION_INCOMPLETE', 'Vẫn còn nội dung chưa xác nhận hủy.');
@@ -163,17 +171,20 @@ export class DestructionWorker {
       });
     } catch (error) {
       // Detailed storage errors stay with the gateway's restricted operational logs.
+      // Only expose a bounded machine code, never raw SQL, paths or error messages.
+      const rawCode = error?.getResponse?.()?.code ?? error?.code;
+      const code = typeof rawCode === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(rawCode) ? rawCode : 'INFRASTRUCTURE_ERROR';
       await this.db.transaction('READ COMMITTED', async m => {
         const r = await m.findOne(Request, { where: { id }, lock: { mode: 'pessimistic_write' } });
         const job = await m.findOne(Job, { where: { requestId: id }, lock: { mode: 'pessimistic_write' } });
         if (!r || !job || (claimed ? job.leaseOwner !== owner : r.status !== 'scheduled')) return;
         const oldStatus = r.status;
         r.status = 'failed'; r.version++; r.failureReason = 'Không thể xác nhận điều kiện hoặc kết quả hủy. Cần kiểm tra vận hành.';
-        job.status = 'failed'; job.lastError = r.failureReason; job.leaseOwner = null; job.leaseExpiry = null;
+        job.status = 'failed'; job.lastError = `${r.failureReason} [${phase}:${code}]`; job.leaseOwner = null; job.leaseExpiry = null;
         await m.save(Request, r); await m.save(Job, job);
         await this.service.audit(m, null, r, 'Hủy hồ sơ gặp lỗi; giữ tiến độ và yêu cầu kiểm tra vận hành', oldStatus, 'failure');
       });
-      this.logger.error(`Công việc hủy ${id} cần kiểm tra vận hành (${error.getResponse?.()?.code || 'INFRASTRUCTURE_ERROR'}).`);
+      this.logger.error(`Công việc hủy ${id} cần kiểm tra vận hành (${code}; phase=${phase}).`);
     } finally { if (heartbeat) clearInterval(heartbeat); }
   }
 
