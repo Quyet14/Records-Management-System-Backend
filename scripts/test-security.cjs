@@ -39,6 +39,7 @@ async function main() {
   const saved = { ...process.env };
   try {
     process.env.NODE_ENV = 'test'; process.env.ARCHIVE_ENCRYPTION_ENABLED = 'true';
+    process.env.DOCUMENT_READABLE_DIR = ''; // Do not use the host's plaintext export directory.
     process.env.ARCHIVE_ALLOW_LEGACY_READ = 'false'; process.env.UPLOAD_SCAN_ENABLED = 'false';
     const archive = path.join(root, 'archive'); fs.mkdirSync(archive);
     process.env.UPLOAD_ARCHIVE_DIR = archive;

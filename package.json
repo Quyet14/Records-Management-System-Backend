@@ -3,6 +3,8 @@
   "version": "1.0.0",
   "description": "Backend cho hệ thống lưu trữ PDF kỹ số (NestJS + MySQL + TypeORM)",
   "scripts": {
+    "documents:export-readable": "node scripts/export-readable-documents.cjs",
+    "test:readable-copies": "npm run build && node scripts/test-readable-copies.cjs",
     "test:security": "npm run build && node scripts/test-security.cjs",
     "db:add-security": "node scripts/apply-security-migration.cjs --apply",
     "build": "nest build",

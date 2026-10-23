@@ -16,6 +16,7 @@ import { Actor, approvalsValid, digest, eligible, fail, staff } from './destruct
 import { distinctRoots, hashFile, inside, LocalDestructionJournal, relativeKey, safePath, walk } from './local-storage';
 import { WindowsDefenderScanner } from './windows-defender-scanner';
 import { inspectDestructionContent } from './content-integrity';
+import { readableRoot, readableDocumentExists, removeReadableDocument } from '../common/readable-copy';
 
 const execute = promisify(execFile);
 interface Target { key: string; label: string; root: string; purgeWithinDays: number; notes: string; versioning: string; authoritative: boolean; enabled?: boolean }
@@ -380,7 +381,8 @@ export class LocalDestructionInfrastructure implements OnModuleDestroy {
       fail(409, 'MANIFEST_CHANGED', 'Manifest hủy không hợp lệ.');
     const prior = journal.get('deletion', payload.operationId);
     if (prior) {
-      if (prior.manifestId !== manifest.id || manifest.objects.some(o => fs.existsSync(safePath(s.archive, o.key, true))))
+      if (prior.manifestId !== manifest.id || readableDocumentExists(payload.documentId)
+        || manifest.objects.some(o => fs.existsSync(safePath(s.archive, o.key, true))))
         fail(409, 'DELETION_REPLAY_CONFLICT', 'Nội dung xuất hiện lại hoặc manifest đã thay đổi.');
       return prior;
     }
@@ -389,6 +391,11 @@ export class LocalDestructionInfrastructure implements OnModuleDestroy {
       if (!exclusion || digest(exclusion.objects) !== digest(manifest.objects)) fail(409, 'EXCLUSION_REQUIRED', 'Chưa ghi đủ tombstone cho các đích backup đang sử dụng.');
     }
     const receipts: any[] = [];
+    // Remove the offline plaintext copy under the same deletion fence.
+    if (readableRoot()) {
+      await this.currentDocument(payload);
+      await removeReadableDocument(payload.documentId);
+    }
     for (const object of manifest.objects) {
       await this.currentDocument(payload);
       const id = digest([payload.operationId, object.key]), filename = safePath(s.archive, object.key, true);
@@ -575,6 +582,7 @@ export class LocalDestructionInfrastructure implements OnModuleDestroy {
       const doc = await this.db.manager.findOne(Document, { where: { id: exclusion.documentId }, relations: ['file'] });
       if (!doc) fail(409, 'RESTORE_DOCUMENT_MISSING', 'Thiếu metadata hồ sơ đã hủy trong bản restore. Cần phục hồi metadata trước khi công bố.');
       const covered = new Map(exclusion.objects.map(o => [keyIdentity(o.key), o.sha256]));
+      await removeReadableDocument(doc.id);
       const rows = [{ storage_path: doc.storagePath }, ...(doc.file ? [{ storage_path: doc.file.storageKey }] : []),
         ...await this.db.manager.query('SELECT storage_path FROM document_versions WHERE document_id=?', [doc.id])];
       for (const row of rows) {

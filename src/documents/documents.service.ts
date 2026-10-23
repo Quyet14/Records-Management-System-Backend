@@ -36,6 +36,7 @@ import { getNormalizedExt, inferMimeType, isPdfFile } from './allowed-file-types
 import { assertDocumentContentAvailable, assertDocumentMutable } from '../common/document-lifecycle';
 import { archiveChecksum, encryptArchiveFile, encryptionEnabled } from '../common/archive-crypto';
 import { inspectUpload } from '../common/upload-inspection';
+import { writeReadableDocument, removeReadableDocument } from '../common/readable-copy';
 
 interface AuthUser {
   id: string;
@@ -153,9 +154,15 @@ export class DocumentsService {
   }
 
   private async saveUploadedDocument(doc: Document): Promise<Document> {
+    let readableCreated = false;
     try {
+      if (doc.status === DocumentStatus.STORED) {
+        doc.id ||= crypto.randomUUID();
+        readableCreated = await writeReadableDocument(doc);
+      }
       return await this.docsRepo.save(doc);
     } catch (error) {
+      if (readableCreated) await removeReadableDocument(doc.id);
       const databaseError = error?.driverError ?? error;
       if ((databaseError?.errno === 1644 || databaseError?.code === 'ER_SIGNAL_EXCEPTION')
         && databaseError?.sqlMessage === 'CONTENT_CLAIMED_FOR_DESTRUCTION') {
@@ -450,7 +457,13 @@ export class DocumentsService {
     doc.sha256Checksum = checksum;
     doc.approvedAt    = new Date();
     doc.approvedBy    = { id: actor.id } as any;
-    const saved = await this.docsRepo.save(doc);
+    const readableCreated = await writeReadableDocument(doc);
+    let saved: Document;
+    try { saved = await this.docsRepo.save(doc); }
+    catch (error) {
+      if (readableCreated) await removeReadableDocument(doc.id);
+      throw error;
+    }
 
     // Tính hạn lưu trữ tự động
     const docWithType = await this.docsRepo.findOne({

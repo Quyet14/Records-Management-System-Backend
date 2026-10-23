@@ -35,11 +35,13 @@ import { refreshCookieOptions } from './auth/auth-cookie';
 import helmet from 'helmet';
 import { DataSource } from 'typeorm';
 import { validateArchiveConfiguration } from './common/archive-crypto';
+import { readableRoot } from './common/readable-copy';
 import { requestAuditMiddleware } from './security/request-audit';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   validateArchiveConfiguration();
+  readableRoot();
   const trustedProxies = (process.env.TRUST_PROXY_CIDRS || '').split(',').map(value => value.trim()).filter(Boolean);
   if (trustedProxies.length) app.getHttpAdapter().getInstance().set('trust proxy', trustedProxies);
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'same-site' } }));

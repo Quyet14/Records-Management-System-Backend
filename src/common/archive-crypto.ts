@@ -24,7 +24,8 @@ export function loadArchiveKeys(): { current: string; keys: Record<string, Buffe
   const real = fs.realpathSync(filename);
   const excluded = [process.cwd(), process.env.UPLOAD_ARCHIVE_DIR, process.env.UPLOAD_STAGING_DIR,
     process.env.PERSONAL_STORAGE_DIR, process.env.BACKUP_DIR, process.env.DESTRUCTION_STATE_DIR,
-    process.env.DESTRUCTION_BACKUP_STAGING_ROOT, process.env.WEB_ROOT].filter(Boolean) as string[];
+    process.env.DESTRUCTION_BACKUP_STAGING_ROOT, process.env.WEB_ROOT,
+    process.env.DOCUMENT_READABLE_DIR].filter(Boolean) as string[];
   if (excluded.some(root => within(root, filename) || within(fs.existsSync(root) ? fs.realpathSync(root) : root, real)))
     throw new Error('Archive keys must be outside the project, web root, storage, journals and backup roots.');
   const stat = fs.statSync(real);
