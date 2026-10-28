@@ -615,7 +615,7 @@ export class DocumentsService {
   // ─── TÌM KIẾM (điểm mấu chốt phân quyền) ──────────────────
   // Admin: thấy toàn bộ, có thể lọc theo khoa.
   // Public đã lưu trữ/duyệt: mọi tài khoản đăng nhập đều thấy.
-  // Department: chỉ cùng khoa; private: chỉ uploader (Admin thấy toàn bộ).
+  // Own uploads are always listed; other department files require the same department.
   async search(query: SearchDocumentDto, user: AuthUser) {
     const qb = this.docsRepo
       .createQueryBuilder('doc')
@@ -688,25 +688,23 @@ export class DocumentsService {
           `(
             ${publicStoredOrApproved}
             OR (doc.visibility = :dept AND department.id = :userDeptId)
-            OR (doc.visibility = :priv AND uploader.id = :uploaderId)
+            OR uploader.id = :uploaderId
           )`,
           {
             public:          DocumentVisibility.PUBLIC,
             publicStatuses: [DocumentStatus.STORED, DocumentStatus.APPROVED],
             dept:            DocumentVisibility.DEPARTMENT,
-            priv:            DocumentVisibility.PRIVATE,
             userDeptId:      user.departmentId,
             uploaderId:      user.id,
           },
         );
       } else {
-        // User chưa được gán khoa — chỉ thấy public đã duyệt + private của mình.
+        // Without a department, list approved public documents and all own uploads.
         qb.andWhere(
-          `(${publicStoredOrApproved} OR (doc.visibility = :priv AND uploader.id = :uploaderId))`,
+          `(${publicStoredOrApproved} OR uploader.id = :uploaderId)`,
           {
             public:          DocumentVisibility.PUBLIC,
             publicStatuses: [DocumentStatus.STORED, DocumentStatus.APPROVED],
-            priv:            DocumentVisibility.PRIVATE,
             uploaderId:      user.id,
           },
         );
@@ -750,10 +748,10 @@ export class DocumentsService {
       qb.andWhere('doc.createdAt <= :dateTo', { dateTo: end });
     }
 
-    // uploaderId chỉ áp dụng cho Admin và Trưởng Khoa (USER đã bị scope cứng ở trên)
-    if (query.uploaderId && user.role !== UserRole.USER) {
-      qb.andWhere('uploader.id = :uploaderId', {
-        uploaderId: query.uploaderId,
+    // Users may filter their own uploads; staff retain their existing search scope.
+    if (query.uploaderId) {
+      qb.andWhere('uploader.id = :filterUploaderId', {
+        filterUploaderId: user.role === UserRole.USER ? user.id : query.uploaderId,
       });
     }
 
