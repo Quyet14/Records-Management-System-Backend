@@ -297,6 +297,15 @@ export class DocumentsController {
   }
 
   /** Full metadata; file viewing/downloading retains its separate access checks. */
+  @Get(':id/dossier')
+  getDossier(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Query() query: PendingQueueDto,
+    @CurrentUser() user,
+  ) {
+    return this.service.getDossier(id, user, query);
+  }
+
   @Get(':id')
   getDetail(@Param('id', new ParseUUIDPipe()) id: string, @CurrentUser() user) {
     return this.service.getDetail(id, user);

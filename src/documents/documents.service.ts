@@ -283,7 +283,29 @@ export class DocumentsService {
     dto: UploadDocumentDto,
     user: AuthUser,
   ): Promise<Document> {
-    dto.departmentId = this.uploadDepartment(dto.departmentId, user);
+    if (!file) throw new BadRequestException('Vui lòng chọn file tải lên.');
+    let dossierRoot: Document | undefined;
+    try {
+      if (dto.dossierRootId) {
+        const selected = await this.getOrFail(dto.dossierRootId);
+        await this.getDetail(selected.id, user);
+        dossierRoot = selected.dossierRootId ? await this.getOrFail(selected.dossierRootId) : selected;
+        await this.getDetail(dossierRoot.id, user);
+        assertDocumentMutable(dossierRoot);
+        if (![DocumentStatus.APPROVED, DocumentStatus.STORED].includes(dossierRoot.status))
+          throw new BadRequestException('Chỉ bổ sung file vào hồ sơ đã được duyệt.');
+        if (user.role !== UserRole.ADMIN && dossierRoot.uploader?.id !== user.id && !canReviewDocument(dossierRoot, user))
+          throw new ForbiddenException('Không có quyền bổ sung file vào bộ hồ sơ này.');
+        dto.departmentId = dossierRoot.department?.id;
+        dto.documentTypeId = dossierRoot.documentType?.id;
+        dto.visibility = dossierRoot.visibility;
+        dto.securityLevel = dossierRoot.securityLevel;
+      }
+      dto.departmentId = this.uploadDepartment(dto.departmentId, user);
+    } catch (error) {
+      if (file.path) fs.rmSync(file.path, { force: true });
+      throw error;
+    }
     const securityLevel = normalizeDocumentSecurityLevel(dto.securityLevel);
     const visibility = dto.visibility ?? DocumentVisibility.DEPARTMENT;
     console.log(`[upload] visibility received: "${dto.visibility}" → using: "${visibility}"`);
@@ -311,6 +333,7 @@ export class DocumentsService {
 
       const doc = this.docsRepo.create({
         originalFilename: file.originalname,
+        dossierRootId: dossierRoot?.id ?? null,
         title:            dto.title,
         summary:          dto.summary,
         referenceNo:      dto.referenceNo,
@@ -358,6 +381,7 @@ export class DocumentsService {
     // public hoặc department → PENDING như bình thường
     const doc = this.docsRepo.create({
       originalFilename: file.originalname,
+      dossierRootId: dossierRoot?.id ?? null,
       title:            dto.title,
       summary:          dto.summary,
       referenceNo:      dto.referenceNo,
@@ -1143,6 +1167,28 @@ export class DocumentsService {
     if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) {
       throw new BadRequestException('Ngay khong ton tai');
     }
+  }
+
+  async getDossier(id: string, user: AuthUser, query: { page?: number; limit?: number } = {}) {
+    await this.getDetail(id, user);
+    const selected = await this.getOrFail(id);
+    const rootId = selected.dossierRootId || selected.id;
+    await this.getDetail(rootId, user);
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(query.limit) || 20));
+    const candidates = await this.docsRepo.find({
+      where: [{ id: rootId }, { dossierRootId: rootId }],
+      select: { id: true },
+      order: { createdAt: 'ASC', id: 'ASC' },
+    });
+    const visible: Awaited<ReturnType<DocumentsService['getDetail']>>[] = [];
+    for (const candidate of candidates) {
+      try { visible.push(await this.getDetail(candidate.id, user)); }
+      catch (error) {
+        if (!(error instanceof ForbiddenException) && !(error instanceof NotFoundException)) throw error;
+      }
+    }
+    return { dossierRootId: rootId, data: visible.slice((page - 1) * limit, page * limit), total: visible.length, page, limit };
   }
 
   async getDetail(id: string, user: AuthUser) {

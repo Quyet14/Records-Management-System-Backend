@@ -3,6 +3,11 @@ import { IsBoolean, IsDateString, IsEnum, IsOptional, IsString, IsUUID } from 'c
 import { ClassificationValue, DocumentVisibility } from '../../entities/document.entity';
 
 export class UploadDocumentDto {
+  /** ID hồ sơ gốc hoặc tài liệu thuộc bộ hồ sơ cần bổ sung. */
+  @IsOptional()
+  @IsUUID()
+  dossierRootId?: string;
+
   @IsString()
   title: string;
 

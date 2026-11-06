@@ -70,6 +70,14 @@ export class Document {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
+  /** Hồ sơ gốc chứa các tài liệu bổ sung; null đối với hồ sơ gốc. */
+  @Column({ name: 'dossier_root_id', type: 'varchar', length: 36, nullable: true })
+  dossierRootId: string | null;
+
+  @ManyToOne(() => Document, { nullable: true, onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'dossier_root_id' })
+  dossierRoot: Document;
+
   @Column({ name: 'original_filename', length: 500 })
   originalFilename: string;
 
